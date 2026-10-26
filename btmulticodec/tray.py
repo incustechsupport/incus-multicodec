@@ -371,9 +371,20 @@ class TrayApp:
             self.engine._changed(f"Restart Windows to finish switching {adapter.name} over")
 
     def _give_back(self, adapter: adapters.Adapter) -> None:
-        if not _ask(f"Give {adapter.name} back to Windows? Bluetooth Multicodec will stop streaming."):
+        if not _ask(f"Give {adapter.name} back to Windows? Bluetooth Multicodec will stop streaming."
+                    f"{self._pair_again_note()}"):
             return
         self._hand_back(adapter)
+
+    def _pair_again_note(self) -> str:
+        """Mice and keyboards keep only their newest pairing, and that's the app's, not Windows' one."""
+        names = sorted({info.get("name") or address for address, info in self.settings.hid_devices.items()})
+        if not names:
+            return ""
+        them = "it" if len(names) == 1 else "them"
+        return (f"\n\nAfterwards, pair {', '.join(names)} with Windows again: remove {them} in Settings → "
+                f"Bluetooth & devices, put {them} in pairing mode and add {them} again. Pairing with Bluetooth "
+                f"Multicodec replaced the pairing Windows had, so Windows can't connect to {them} as things are.")
 
     def _hand_back(self, adapter: adapters.Adapter) -> None:
         """Close the adapter, then return it to Windows' own driver (no restart needed once it's closed)."""
@@ -491,7 +502,8 @@ class TrayApp:
         # Leaving the PC's own Bluetooth on WinUSB with the app closed leaves the user with none at all
         system = [a for a in adapters.ours() if a.instance_id == system_adapter()] if ask else []
         if system and _ask("Give this PC's Bluetooth back to Windows now?\n\n"
-                           "If you don't, Windows Bluetooth stays off until Bluetooth Multicodec runs again."):
+                           "If you don't, Windows Bluetooth stays off until Bluetooth Multicodec runs again."
+                           f"{self._pair_again_note()}"):
             self._hand_back(system[0])
         self.window.close()
         self.bug_report.close()

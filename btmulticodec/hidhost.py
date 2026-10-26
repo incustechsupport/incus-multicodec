@@ -45,6 +45,9 @@ STREAMING_SCAN_INTERVAL_MS, STREAMING_SCAN_WINDOW_MS = 640, 30
 # A passive scan normally hears some advertiser (phones, TVs, the mouse itself) every few seconds. This
 # long without one means the controller has most likely stopped scanning while we think it's on.
 SCAN_SILENCE_RESTART_S = 30
+# Connect + re-encrypt + GATT setup of a waking device. Anything longer is stuck; giving up frees the
+# radio so the background scan catches the device's next wake-up advert.
+RECONNECT_TIMEOUT_S = 30
 
 
 def is_hid_advertisement(data: AdvertisingData) -> bool:
@@ -194,26 +197,41 @@ class HidHost:
         connection = None
         key = identity
         try:
-            if device.scanning:
-                await device.stop_scanning()
-            connection = await device.connect(current or hci.Address(identity), transport=PhysicalTransport.LE,
-                                              own_address_type=hci.OwnAddressType.PUBLIC, timeout=15)
-            if pairing:
-                await connection.pair()
-                await device.refresh_resolving_list()
-                # Privacy-enabled devices advertise from changing private addresses; the bond is stored
-                # under their identity address, which is also what _on_advertisement resolves to
-                resolved = self._identity(current or hci.Address(identity))
-                if resolved != key:
-                    self.known()[resolved] = self.known().pop(key)
-                    self.settings.save()
-                    key = resolved
-            else:
-                await connection.encrypt()
-            descriptor = await self._subscribe_gatt(key, connection)
+            async with asyncio.timeout(None if pairing else RECONNECT_TIMEOUT_S):
+                if device.scanning:
+                    await device.stop_scanning()
+                target = current or hci.Address(identity)
+                if current is not None and not current.is_resolvable:
+                    # The device just advertised from its identity address. Because we hold its IRK,
+                    # Bumble would still go looking for it first (a scan with no timeout for a new advert
+                    # resolving to that identity); the wake-up burst is over by then, so it waited
+                    # until the next search
+                    async def found(_address):
+                        return target
+                    device.find_peer_by_identity_address = found
+                try:
+                    connection = await device.connect(target, transport=PhysicalTransport.LE,
+                                                      own_address_type=hci.OwnAddressType.PUBLIC, timeout=15)
+                finally:
+                    device.__dict__.pop("find_peer_by_identity_address", None)
+                if pairing:
+                    await connection.pair()
+                    await device.refresh_resolving_list()
+                    # Privacy-enabled devices advertise from changing private addresses; the bond is stored
+                    # under their identity address, which is also what _on_advertisement resolves to
+                    resolved = self._identity(target)
+                    if resolved != key:
+                        self.known()[resolved] = self.known().pop(key)
+                        self.settings.save()
+                        key = resolved
+                else:
+                    await connection.encrypt()
+                descriptor = await self._subscribe_gatt(key, connection)
             self._linked(key, connection, descriptor)
             return True
         except Exception as error:
+            if isinstance(error, TimeoutError):
+                error = f"no answer within {RECONNECT_TIMEOUT_S}s; waiting for it to advertise again"
             logger.info(f"LE HID {key}: {error}")
             if connection is not None:
                 # A half-set-up link keeps the device from advertising, so it would never come back
