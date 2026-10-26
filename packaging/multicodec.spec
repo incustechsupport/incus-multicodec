@@ -26,7 +26,7 @@ a = Analysis(
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    excludes=["tkinter", "matplotlib", "scipy", "PyQt5", "PySide6"],
+    excludes=["matplotlib", "scipy", "PyQt5", "PySide6"],  # tkinter is used by the devices window
 )
 pyz = PYZ(a.pure)
 

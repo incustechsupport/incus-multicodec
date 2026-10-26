@@ -245,8 +245,13 @@ class LivePump:
 
                 chunk_count += 1
                 if chunk_count % adapt_every == 0:
-                    # Rate control wants the backlog in media packets; the host counts ACL fragments
-                    session.adapt((acl.pending if acl else 0) // frags_per_packet)
+                    # Rate control wants the host-side transmit backlog in media packets, as Android
+                    # measures it. Bumble's `pending` also counts packets the controller already holds
+                    # (several on any healthy link), which libldac reads as congestion: its HQ/SQ safety
+                    # threshold is 2, so it never left the lowest steps. Count only what's still queued
+                    # in the host (Bumble 0.0.236's DataPacketQueue._packets), in ACL fragments.
+                    backlog = len(acl._packets) if acl is not None and hasattr(acl, "_packets") else 0
+                    session.adapt(backlog // frags_per_packet)
 
                 now = loop.time()
                 if now - last_report >= 1.0:

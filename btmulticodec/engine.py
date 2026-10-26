@@ -61,6 +61,7 @@ class Status:
     found: dict[str, str] = field(default_factory=dict)  # address -> name from the last scan
     found_kind: dict[str, str] = field(default_factory=dict)  # address -> "audio" | "hid" | "hid-le"
     found_class: dict[str, int] = field(default_factory=dict)  # address -> class of device (classic)
+    found_rssi: dict[str, int] = field(default_factory=dict)  # address -> signal strength (dBm)
 
 
 class _Delegate(PairingDelegate):
@@ -92,6 +93,7 @@ class Engine:
         self._pending_change = None  # asyncio.TimerHandle for _changed_soon
         self._session: asyncio.Task | None = None  # the running adapter session
         self._released = False  # adapter handed back; don't reopen it
+        self._unreachable: str | None = None  # device whose reconnect failure was already reported
 
     # ------------------------------------------------------------------ public (any thread)
     def start(self) -> None:
@@ -275,8 +277,15 @@ class Engine:
             connection = await self.device.connect(classic_address(address), transport=PhysicalTransport.BR_EDR,
                                                    timeout=10)
         except Exception as error:
-            logger.debug(f"connect {address} failed: {error}")
+            # Say it once per stretch of failures (it retries every RECONNECT_SECONDS), not every time
+            if self._unreachable != address:
+                self._unreachable = address
+                name = self.settings.devices.get(address, address)
+                self._changed(f"Can't reach {name} right now ({error}); it will connect when it's on and in range")
+            else:
+                logger.debug(f"connect {address} failed: {error}")
             return
+        self._unreachable = None
         await self._setup(connection, initiator=True)
 
     def _on_acl_connection(self, connection) -> None:
@@ -424,9 +433,12 @@ class Engine:
         if self.device is None or self.status.scanning:
             return
         self.status.scanning, self.status.found, self.status.found_kind = True, {}, {}
+        self.status.found_rssi = {}
         self._changed("Searching for headphones, speakers, mice and keyboards... (put them in pairing mode)")
 
-        def add(key, name, kind):
+        def add(key, name, kind, rssi=None):
+            if rssi is not None:
+                self.status.found_rssi[key] = rssi
             if (name and self.status.found.get(key) != name) or key not in self.status.found:
                 self.status.found[key] = name or key
                 self.status.found_kind[key] = kind
@@ -438,11 +450,11 @@ class Engine:
             if kind:
                 key = str(address).split("/")[0]
                 self.status.found_class[key] = class_of_device
-                add(key, advertised_name(data), kind)
+                add(key, advertised_name(data), kind, rssi)
 
         def on_advertisement(advertisement):
             if is_hid_advertisement(advertisement.data):
-                add(str(advertisement.address), advertised_name(advertisement.data), "hid-le")
+                add(str(advertisement.address), advertised_name(advertisement.data), "hid-le", advertisement.rssi)
 
         self.hid.paused = True
         self.device.on("inquiry_result", on_inquiry)

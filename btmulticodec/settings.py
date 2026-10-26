@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 import threading
 from dataclasses import asdict, dataclass, field
+
+logger = logging.getLogger(__name__)
 
 STATE_DIR = pathlib.Path(os.environ.get("LOCALAPPDATA", pathlib.Path.home())) / "windows-bluetooth-multicodec"
 SETTINGS_FILE = STATE_DIR / "settings.json"
@@ -48,8 +51,12 @@ class Settings:
     @classmethod
     def load(cls) -> Settings:
         try:
-            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            # utf-8-sig: Windows tools (PowerShell 5's Set-Content, Notepad) may add a BOM
+            data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8-sig"))
+        except OSError:
+            return cls()
+        except ValueError:
+            logger.warning(f"{SETTINGS_FILE} is not valid JSON; starting with default settings")
             return cls()
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         return cls(**known)

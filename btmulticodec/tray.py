@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw
 from pystray import Menu, MenuItem as Item
 
 from . import adapters, capture, selection
+from .devices_window import DevicesWindow
 from .engine import Engine
 from .settings import LOG_FILE, STATE_DIR, Settings, set_system_adapter, system_adapter
 
@@ -99,6 +100,7 @@ class TrayApp:
         # pystray's update_menu() rebuilds (and destroys) the menu on the calling thread; the engine
         # calls in from its own thread, so hop over to the tray thread first
         self.icon._message_handlers[WM_APP_UPDATE_MENU] = lambda wparam, lparam: self.icon.update_menu()
+        self.window = DevicesWindow(self.engine, _icon_image("idle"))
         self._last_message = None
 
     def run(self) -> None:
@@ -144,6 +146,7 @@ class TrayApp:
         return (
             Item(self._status_line(), None, enabled=False),
             Menu.SEPARATOR,
+            Item("Bluetooth devices...", lambda: self.window.show(), default=True),  # also a left-click
             Item("Devices", Menu(self._device_items)),
             Item("Codec", Menu(self._codec_items)),
             Item("LDAC quality", Menu(self._quality_items)),
@@ -183,15 +186,8 @@ class TrayApp:
                 ), checked=(lambda c: lambda _: c)(connected)))
         if items:
             items.append(Menu.SEPARATOR)
-        if s.scanning:
-            items.append(Item("Searching... (put the device in pairing mode)", None, enabled=False))
-        else:
-            items.append(Item("Add a device...", lambda: self.engine.scan(12), enabled=self.engine.device is not None))
-        kinds = {"audio": "headphones/speaker", "hid": "mouse/keyboard", "hid-le": "mouse/keyboard"}
-        for address, name in s.found.items():
-            if address not in self.settings.devices and address not in self.settings.hid_devices:
-                kind = kinds.get(s.found_kind.get(address, "audio"), "")
-                items.append(Item(f"Pair {name} ({kind})", (lambda a, n: lambda: self.engine.pair(a, n))(address, name)))
+        # Searching and pairing live in the Bluetooth devices window
+        items.append(Item("Add a device...", lambda: self.window.show()))
         return items
 
     def _codec_items(self):
@@ -340,6 +336,7 @@ class TrayApp:
         if system and _ask("Give this PC's Bluetooth back to Windows now?\n\n"
                            "If you don't, Windows Bluetooth stays off until Bluetooth Multicodec runs again."):
             self._hand_back(system[0])
+        self.window.close()
         try:
             self.engine.shutdown()
         except Exception:
