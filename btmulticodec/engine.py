@@ -24,7 +24,7 @@ from bumble.transport import open_transport
 
 import usb1
 
-from . import adapters, capture, selection
+from . import adapters, bumble_patches, capture, selection  # noqa: F401 (bumble_patches: applied on import)
 from .hidhost import HidHost, advertised_name, is_hid_advertisement
 from .settings import KEYS_FILE, STATE_DIR, Settings, system_adapter
 from .stream import LivePump
