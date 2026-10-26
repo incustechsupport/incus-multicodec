@@ -149,6 +149,8 @@ class Engine:
     async def _wait_for_adapter(self) -> str:
         while True:
             found = await asyncio.to_thread(adapters.ours)
+            # A dongle wins over the built-in adapter (mid-switch from the no-dongle fallback)
+            found.sort(key=lambda a: not a.removable)
             if found:
                 self.status.adapter_problem = None
                 self.status.adapter = found[0].name
@@ -348,9 +350,13 @@ class Engine:
             await self.device.start_scanning(active=True)
             await self.device.start_discovery()
             await asyncio.sleep(seconds)
-            await self.device.stop_discovery()
-            await self.device.stop_scanning()
         finally:
+            # Never leave a full-duty scan running: it starves the radio while audio streams
+            for stop in (self.device.stop_discovery, self.device.stop_scanning):
+                try:
+                    await stop()
+                except Exception:
+                    pass
             self.device.remove_listener("inquiry_result", on_inquiry)
             self.device.remove_listener("advertisement", on_advertisement)
             self.hid.paused = False

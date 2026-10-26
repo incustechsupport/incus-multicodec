@@ -22,7 +22,10 @@ WHENCE = "https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmwar
 
 def run_bumble_tool(module: str, out: pathlib.Path, env: dict | None = None) -> None:
     out.mkdir(parents=True, exist_ok=True)
-    subprocess.run([sys.executable, "-m", module, "--output-dir", str(out)], check=False, env=env)
+    # The tools report individual 404s (expected for symlinked files) but exit non-zero on real failures
+    result = subprocess.run([sys.executable, "-m", module, "--output-dir", str(out)], env=env, timeout=900)
+    if result.returncode:
+        raise SystemExit(f"{module} failed (exit {result.returncode})")
 
 
 def main() -> None:
@@ -37,7 +40,7 @@ def main() -> None:
         run_bumble_tool("bumble.tools.rtk_fw_download", FIRMWARE / "realtek", env)
 
     request = urllib.request.Request(WHENCE, headers={"User-Agent": "windows-bluetooth-multicodec"})
-    whence = urllib.request.urlopen(request).read().decode()
+    whence = urllib.request.urlopen(request, timeout=60).read().decode()
     added = 0
     for name, target in re.findall(r"^Link: intel/(ibt-[\w-]+\.(?:sfi|ddc)) -> (ibt-[\w-]+\.(?:sfi|ddc))$", whence, re.M):
         source, alias = FIRMWARE / "intel" / target, FIRMWARE / "intel" / name
@@ -45,6 +48,14 @@ def main() -> None:
             shutil.copyfile(source, alias)
             added += 1
     print(f"intel: added {added} aliased firmware files")
+
+    # Don't let a silent download failure ship an installer without firmware
+    from bumble.drivers import intel
+    missing = [f"{base}.sfi" for base in intel.INTEL_FW_IMAGE_NAMES if not (FIRMWARE / "intel" / f"{base}.sfi").is_file()]
+    realtek = list((FIRMWARE / "realtek").glob("rtl*_fw.bin"))
+    if missing or len(realtek) < 10:
+        raise SystemExit(f"firmware incomplete: missing Intel {missing}, {len(realtek)} Realtek images")
+    print(f"firmware complete: {len(intel.INTEL_FW_IMAGE_NAMES)} Intel images, {len(realtek)} Realtek images")
 
 
 if __name__ == "__main__":

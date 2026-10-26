@@ -49,7 +49,8 @@ class InputState:
     hwheel: int = 0
     keys: set[int] = field(default_factory=set)  # keyboard-page usages, including modifiers 0xE0-0xE7
     consumer: set[int] = field(default_factory=set)
-    has_pointer: bool = False
+    has_pointer: bool = False  # movement/wheel fields present
+    has_buttons: bool = False  # button fields present: only then does an empty `buttons` mean "released"
     has_keys: bool = False
     has_consumer: bool = False
 
@@ -184,7 +185,7 @@ class ReportDescriptor:
             elif usage == USAGE_WHEEL:
                 state.wheel += v
         elif page == PAGE_BUTTON:
-            state.has_pointer = True
+            state.has_pointer = state.has_buttons = True
             if v:
                 state.buttons.add(usage)
         elif page == PAGE_KEYBOARD:

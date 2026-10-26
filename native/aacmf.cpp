@@ -31,6 +31,8 @@ struct Encoder {
     DWORD out_size = 0;
     bool provides_samples = false;
     LONGLONG time = 0;
+    bool com_initialized = false;  // our CoInitializeEx succeeded, so we owe a CoUninitialize
+    bool mf_started = false;       // MFStartup succeeded, so we owe an MFShutdown
 };
 
 static HRESULT set_types(Encoder* e, int bytes_per_second) {
@@ -67,16 +69,24 @@ extern "C" __declspec(dllexport) void aacmf_close(void* handle) {
     auto* e = static_cast<Encoder*>(handle);
     if (!e) return;
     if (e->mft) e->mft->Release();
+    if (e->mf_started) MFShutdown();
+    if (e->com_initialized) CoUninitialize();
     delete e;
-    MFShutdown();
 }
 
 extern "C" __declspec(dllexport) void* aacmf_open(int sample_rate, int channels, int bytes_per_second, long* hr_out) {
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    if (hr == RPC_E_CHANGED_MODE) hr = S_OK;  // the thread already has COM; fine either way
-    if (SUCCEEDED(hr)) hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
     auto* e = new (std::nothrow) Encoder();
-    if (!e) hr = E_OUTOFMEMORY;
+    if (!e) {
+        if (hr_out) *hr_out = E_OUTOFMEMORY;
+        return nullptr;
+    }
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    e->com_initialized = SUCCEEDED(hr);  // S_OK or S_FALSE both need balancing
+    if (hr == RPC_E_CHANGED_MODE) hr = S_OK;  // the thread already has COM in another mode; usable as is
+    if (SUCCEEDED(hr)) {
+        hr = MFStartup(MF_VERSION, MFSTARTUP_LITE);
+        e->mf_started = SUCCEEDED(hr);
+    }
     if (SUCCEEDED(hr)) {
         e->channels = channels;
         e->sample_rate = sample_rate;
@@ -93,7 +103,7 @@ extern "C" __declspec(dllexport) void* aacmf_open(int sample_rate, int channels,
     }
     if (hr_out) *hr_out = hr;
     if (FAILED(hr)) {
-        if (e) aacmf_close(e);
+        aacmf_close(e);
         return nullptr;
     }
     return e;

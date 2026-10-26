@@ -129,14 +129,22 @@ class HidHost:
         return str(address)
 
     def _on_advertisement(self, advertisement) -> None:
+        if self.paused:
+            return  # the user's "Add a device" scan owns the radio; don't cut it short
         identity = self._identity(advertisement.address)
         info = self.known().get(identity)
         if info and info.get("le") and identity not in self.links and identity not in self.connecting:
+            # Claim it now: a burst of advertisements arrives before the task first runs
+            self.connecting.add(identity)
             asyncio.ensure_future(self.connect_le(identity, advertisement.address))
 
     async def connect_le(self, identity: str, current: hci.Address | None = None, pairing: bool = False) -> bool:
+        """Connect (and pair, when pairing) an LE HID device. When pairing, `identity` may be the
+        private address seen while scanning; the entry is re-keyed to the real identity once known."""
         self.connecting.add(identity)
         device = self.device
+        connection = None
+        key = identity
         try:
             if device.scanning:
                 await device.stop_scanning()
@@ -145,18 +153,32 @@ class HidHost:
             if pairing:
                 await connection.pair()
                 await device.refresh_resolving_list()
+                # Privacy-enabled devices advertise from changing private addresses; the bond is stored
+                # under their identity address, which is also what _on_advertisement resolves to
+                resolved = self._identity(current or hci.Address(identity))
+                if resolved != key:
+                    self.known()[resolved] = self.known().pop(key)
+                    self.settings.save()
+                    key = resolved
             else:
                 await connection.encrypt()
-            descriptor = await self._subscribe_gatt(identity, connection)
-            self._linked(identity, connection, descriptor)
+            descriptor = await self._subscribe_gatt(key, connection)
+            self._linked(key, connection, descriptor)
             return True
         except Exception as error:
-            logger.info(f"LE HID {identity}: {error}")
+            logger.info(f"LE HID {key}: {error}")
+            if connection is not None:
+                # A half-set-up link keeps the device from advertising, so it would never come back
+                try:
+                    await connection.disconnect()
+                except Exception:
+                    pass
             if pairing:
                 raise
             return False
         finally:
             self.connecting.discard(identity)
+            self.connecting.discard(key)
 
     async def _subscribe_gatt(self, identity: str, connection) -> ReportDescriptor:
         peer = Peer(connection)
@@ -196,15 +218,34 @@ class HidHost:
 
     # ------------------------------------------------------------------ Classic HID
     def _on_classic_channel(self, channel: l2cap.ClassicChannel) -> None:
-        address = str(channel.connection.peer_address).split("/")[0]
+        connection = channel.connection
+        address = str(connection.peer_address).split("/")[0]
         if address not in self.known():
             return
+        info = self.known()[address]
+        if not connection.is_encrypted:
+            # Anyone can claim a paired keyboard's address; only the bonded device has the link key.
+            # Reports are dropped (_on_classic_pdu) until this succeeds.
+            asyncio.ensure_future(self._secure_classic(connection, address))
         if channel.psm == HID_INTERRUPT_PSM:
             channel.sink = lambda pdu: self._on_classic_pdu(address, pdu)
-            info = self.known()[address]
-            self._linked(address, channel.connection, self._classic_descriptor(info))
+            self._linked(address, connection, self._classic_descriptor(info))
         else:
             channel.sink = lambda pdu: None
+            if not info.get("descriptor"):
+                # Devices come back in report protocol; put them in the boot protocol we decode
+                channel.on("open", lambda: channel.write(bytes([HIDP_SET_PROTOCOL_BOOT])))
+
+    async def _secure_classic(self, connection, address: str) -> None:
+        try:
+            await connection.authenticate()
+            await connection.encrypt()
+        except Exception as error:
+            logger.warning(f"classic HID {address} failed authentication ({error}); dropping it")
+            try:
+                await connection.disconnect()
+            except Exception:
+                pass
 
     def _classic_descriptor(self, info: dict) -> ReportDescriptor:
         if info.get("descriptor"):
@@ -212,8 +253,14 @@ class HidHost:
         return ReportDescriptor(BOOT_KEYBOARD if info.get("keyboard") else BOOT_MOUSE)
 
     def _on_classic_pdu(self, address: str, pdu: bytes) -> None:
+        link = self.links.get(address)
+        if link is None or not link.connection.is_encrypted:
+            return
         if pdu and pdu[0] == HIDP_DATA_INPUT:
-            self._on_report(address, pdu[1:], None)
+            report = pdu[1:]
+            if not self.known().get(address, {}).get("descriptor") and report[:1] in (b"\x01", b"\x02"):
+                report = report[1:]  # Bluetooth boot reports carry a report ID (1 keyboard, 2 mouse)
+            self._on_report(address, report, None)
 
     async def pair_classic(self, address: str, name: str, class_of_device: int) -> None:
         from .engine import classic_address
@@ -224,6 +271,17 @@ class HidHost:
         except (KeyError, AttributeError):
             pass
         connection = await device.connect(peer, transport=PhysicalTransport.BR_EDR, timeout=15)
+        try:
+            await self._pair_classic_connected(connection, address, name, class_of_device)
+        except Exception:
+            self.known().pop(address, None)
+            try:
+                await connection.disconnect()
+            except Exception:
+                pass
+            raise
+
+    async def _pair_classic_connected(self, connection, address: str, name: str, class_of_device: int) -> None:
         await connection.authenticate()
         await connection.encrypt()
         descriptor_hex = None

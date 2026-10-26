@@ -193,10 +193,17 @@ def _hard_problem(adapter: Adapter, adapters: list[Adapter]) -> str | None:
     return None
 
 
+def holding_builtin(adapters: list[Adapter]) -> list[Adapter]:
+    """Built-in adapters Bluetooth Multicodec currently has (the no-dongle fallback)."""
+    return [a for a in adapters if a.ours and not a.removable]
+
+
 def is_system_adapter(adapter: Adapter, adapters: list[Adapter]) -> bool:
     """Built into the PC, or the only Bluetooth adapter Windows has: taking it costs the user Windows Bluetooth."""
     if not adapter.removable:
         return True
+    if holding_builtin(adapters):
+        return False  # switching to this dongle gives the built-in one back to Windows
     return adapter.windows_owned and not any(
         a.windows_owned for a in adapters if a.instance_id != adapter.instance_id)
 
@@ -215,12 +222,6 @@ def takeover_problem(adapter: Adapter, adapters: list[Adapter] | None = None) ->
         if dongles:
             return f"use the {dongles[0].name} dongle instead, so Windows keeps its own Bluetooth"
     return None
-
-
-def takeover_warning(adapter: Adapter, adapters: list[Adapter] | None = None) -> str | None:
-    """What the user gives up by switching this adapter, if anything."""
-    adapters = adapters if adapters is not None else list_adapters()
-    return SYSTEM_ADAPTER_WARNING if is_system_adapter(adapter, adapters) else None
 
 
 def _run_elevated(exe: pathlib.Path, args: str) -> int:

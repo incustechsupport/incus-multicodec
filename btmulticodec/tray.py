@@ -253,6 +253,8 @@ class TrayApp:
                     "Windows will ask for administrator permission."):
             return
 
+        builtin = adapters.holding_builtin(found)
+
         def work():
             try:
                 adapters.take_over(adapter)
@@ -260,6 +262,14 @@ class TrayApp:
                 self.settings.save()
             except Exception as error:
                 _error(f"Couldn't set up {adapter.name}:\n{error}")
+                return
+            # Moving from the no-dongle fallback to a dongle: Windows gets its own Bluetooth back
+            for old in builtin:
+                try:
+                    adapters.give_back(old)
+                except Exception as error:
+                    _error(f"{adapter.name} is set up, but giving {old.name} back to Windows failed:\n{error}\n\n"
+                           "Use Bluetooth dongle → Give back to Windows to retry.")
         threading.Thread(target=work, daemon=True).start()
 
     def _give_back(self, adapter: adapters.Adapter) -> None:

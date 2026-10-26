@@ -135,7 +135,9 @@ class Injector:
     def apply(self, device: str, state: InputState) -> None:
         d = self.devices.setdefault(device, _DeviceInput())
         out: list[INPUT] = []
-        if state.has_pointer:
+        if state.has_buttons:
+            # Only reports that carry button fields say anything about buttons; a separate
+            # scroll-only report (e.g. horizontal wheel) must not release a held drag
             for button in sorted(state.buttons - d.buttons):
                 if button in BUTTON_FLAGS:
                     down, _, data = BUTTON_FLAGS[button]
@@ -145,6 +147,7 @@ class Injector:
                     _, up, data = BUTTON_FLAGS[button]
                     out.append(_mouse(up, data=data))
             d.buttons = set(state.buttons)
+        if state.has_pointer:
             if state.dx or state.dy:
                 out.append(_mouse(MOUSEEVENTF_MOVE, state.dx, state.dy))
             if state.wheel:
