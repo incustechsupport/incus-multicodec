@@ -2,7 +2,7 @@
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\multicodec.iss
 ; Per-user install (no admin); admin rights are only asked for when a dongle is switched to WinUSB.
 
-#define AppVersion "0.1.2"
+#define AppVersion "0.1.4"
 
 [Setup]
 AppId={{6F6E7C1A-3C7B-4C7E-9B8B-1D2A0C5E7A10}
@@ -37,7 +37,17 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Run]
 Filename: "{app}\bt-multicodec.exe"; Description: "Start Windows Bluetooth Multicodec now"; Flags: nowait postinstall skipifsilent
+; In-app updates run the installer silently with /update=1: start the app again afterwards
+Filename: "{app}\bt-multicodec.exe"; Flags: nowait; Check: IsUpdate
+
+[Code]
+function IsUpdate: Boolean;
+begin
+  Result := ExpandConstant('{param:update|0}') = '1';
+end;
 
 [UninstallRun]
 ; Hand any dongle Bluetooth Multicodec owns back to Windows (prompts for admin if one exists)
 Filename: "{app}\bt-multicodec-cli.exe"; Parameters: "release-adapter"; Flags: runhidden waituntilterminated; RunOnceId: "ReleaseAdapter"
+; The optional "run as administrator" task (may need admin to delete; harmless if it fails or is absent)
+Filename: "schtasks.exe"; Parameters: "/delete /tn ""Windows Bluetooth Multicodec (administrator)"" /f"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAdminTask"

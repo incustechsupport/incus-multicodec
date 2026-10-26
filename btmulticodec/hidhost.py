@@ -38,7 +38,10 @@ HIDP_DATA_INPUT = 0xA1
 HIDP_SET_PROTOCOL_BOOT = 0x70
 REPORT_TYPE_INPUT = 1
 APPEARANCE_HID_CATEGORY = 0x0F  # appearance >> 6: keyboard, mouse, joystick, ...
-SCAN_INTERVAL_MS, SCAN_WINDOW_MS = 240, 48  # 20% duty: spots waking devices without starving audio
+SCAN_INTERVAL_MS, SCAN_WINDOW_MS = 240, 48  # 20% duty: spots a waking device within a second or so
+# While audio streams the radio's time belongs to the music: ~5% duty still catches a waking mouse's
+# burst of reconnect adverts (high-duty directed adverts arrive every few ms for 1.28 s), just later
+STREAMING_SCAN_INTERVAL_MS, STREAMING_SCAN_WINDOW_MS = 640, 30
 # A passive scan normally hears some advertiser (phones, TVs, the mouse itself) every few seconds. This
 # long without one means the controller has most likely stopped scanning while we think it's on.
 SCAN_SILENCE_RESTART_S = 30
@@ -76,6 +79,7 @@ class HidHost:
         self.last_advert = 0.0  # loop time of the last advertisement of any kind
         self.scan_started = 0.0
         self.scan_failed = False
+        self.scan_params: tuple[int, int] | None = None  # (interval, window) of the running scan
         self.announced: set[str] = set()  # missing devices last logged as being waited for
 
     @property
@@ -122,8 +126,17 @@ class HidHost:
             if not missing:
                 self.announced = set()
             now = asyncio.get_running_loop().time()
+            params = ((STREAMING_SCAN_INTERVAL_MS, STREAMING_SCAN_WINDOW_MS) if self.engine.status.streaming
+                      else (SCAN_INTERVAL_MS, SCAN_WINDOW_MS))
             try:
-                if want_scan and device.scanning and (
+                if want_scan and device.scanning and params != self.scan_params:
+                    # Music started or stopped: switch to the matching duty cycle
+                    try:
+                        await device.stop_scanning()
+                    except Exception:
+                        pass
+                    device.scanning = False
+                elif want_scan and device.scanning and (
                         self.scan_failed or now - max(self.last_advert, self.scan_started) > SCAN_SILENCE_RESTART_S):
                     # The controller can stop scanning without telling us (or a stop/start failed half
                     # way), leaving device.scanning True: a sleeping mouse would then never be seen again
@@ -138,9 +151,9 @@ class HidHost:
                     # Public own address: bonded devices send directed "reconnect" adverts to the address
                     # they paired with (we connect with our public one), and the controller drops directed
                     # adverts addressed to anyone else
-                    await device.start_scanning(active=False, scan_interval=SCAN_INTERVAL_MS,
-                                                scan_window=SCAN_WINDOW_MS, filter_duplicates=False,
-                                                own_address_type=hci.OwnAddressType.PUBLIC)
+                    await device.start_scanning(active=False, scan_interval=params[0], scan_window=params[1],
+                                                filter_duplicates=False, own_address_type=hci.OwnAddressType.PUBLIC)
+                    self.scan_params = params
                     self.scan_started = now
                     self.scan_failed = False
                     if set(missing) != self.announced:  # once per change, not after every search

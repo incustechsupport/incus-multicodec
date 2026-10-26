@@ -281,9 +281,10 @@ class DevicesWindow:
 
     def _keep_searching(self) -> None:
         """While the window is open, search continuously (keeping results) so a device can be put in
-        pairing mode at any time. Pauses while the window is hidden."""
+        pairing mode at any time. Pauses while the window is hidden or minimised: each search takes
+        radio time from streamed audio."""
         if self.root is None:
             return
-        if self.root.state() != "withdrawn" and not self.engine.status.scanning:
+        if self.root.state() not in ("withdrawn", "iconic") and not self.engine.status.scanning:
             self._search(fresh=False)
         self.root.after(1500, self._keep_searching)

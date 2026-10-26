@@ -466,7 +466,12 @@ class Engine:
             if self.device.scanning:
                 await self.device.stop_scanning()
             if self.device.le_enabled:
-                await self.device.start_scanning(active=True)
+                # Bumble's default scans 100% of the time, which starves streamed audio of radio time.
+                # A quarter still finds devices in pairing mode (they advertise quickly) within seconds
+                if self.stream is not None:
+                    await self.device.start_scanning(active=True, scan_interval=120, scan_window=30)
+                else:
+                    await self.device.start_scanning(active=True)
             # A Classic inquiry takes most of the radio's time and makes streamed audio stutter: repeat
             # (non-fresh) searches skip it while music plays; LE scanning (mice, keyboards) is cheap
             classic = fresh or self.stream is None

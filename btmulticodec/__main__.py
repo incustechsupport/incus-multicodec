@@ -269,6 +269,8 @@ def cmd_play(args) -> None:
                   else capture.DeviceCapture(args.source))
         rate = source.output_rate(selection.sample_rates(key, caps))
         configuration = selection.configure(key, caps, rate)
+        from .realtime import boost_process
+        boost_process()
 
         def on_stats(mode, kbps, backlog_ms, dropped):
             print(f"\r  {mode}  {kbps:6.0f} kbps  buffer {backlog_ms:4.0f} ms  dropped {dropped}   ",

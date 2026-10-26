@@ -8,13 +8,14 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import winreg
 
 import pystray
 from PIL import Image, ImageDraw
 from pystray import Menu, MenuItem as Item
 
-from . import adapters, capture, selection
+from . import __version__, adapters, capture, elevation, realtime, selection, updater
 from .bugreport import BugReportWindow
 from .devices_window import DevicesWindow
 from .engine import Engine
@@ -25,11 +26,14 @@ logger = logging.getLogger(__name__)
 APP_NAME = "Windows Bluetooth Multicodec"
 RUN_VALUE = "windows-bluetooth-multicodec"  # autostart entry name
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-MB_YESNO, MB_ICONWARNING, MB_ICONERROR, IDYES = 0x04, 0x30, 0x10, 6
+MB_YESNO, MB_ICONWARNING, MB_ICONERROR, MB_ICONINFORMATION, IDYES = 0x04, 0x30, 0x10, 0x40, 6
 # A box opened from a tray app has no window of its own to sit on; without these it can open
 # behind other windows or without input focus
 MB_SETFOREGROUND, MB_TOPMOST = 0x00010000, 0x00040000
-WM_APP_UPDATE_MENU = 0x8000 + 0x101  # WM_APP-range message: rebuild the menu on the tray's own thread
+WM_APP_UPDATE_MENU = 0x8000 + 0x101  # WM_APP-range message: refresh icon + menu on the tray's own thread
+UPDATE_FIRST_CHECK_SECONDS = 60  # after startup, once Bluetooth has settled
+UPDATE_CHECK_SECONDS = 12 * 3600
+MENU_REFRESH_SECONDS = 10  # the bitrate changes every second; the menu shows it, but needn't be rebuilt that often
 
 
 def _icon_image(state: str) -> Image.Image:
@@ -51,6 +55,10 @@ def _ask(text: str, title: str = APP_NAME) -> bool:
 
 def _error(text: str) -> None:
     ctypes.windll.user32.MessageBoxW(None, text, APP_NAME, MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST)
+
+
+def _info(text: str) -> None:
+    ctypes.windll.user32.MessageBoxW(None, text, APP_NAME, MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST)
 
 
 def _background(action):
@@ -100,20 +108,31 @@ class TrayApp:
         self.icon = pystray.Icon("windows-bluetooth-multicodec", _icon_image("none"), APP_NAME, menu=Menu(self._menu_items))
         # pystray's update_menu() rebuilds (and destroys) the menu on the calling thread; the engine
         # calls in from its own thread, so hop over to the tray thread first
-        self.icon._message_handlers[WM_APP_UPDATE_MENU] = lambda wparam, lparam: self.icon.update_menu()
+        self.icon._message_handlers[WM_APP_UPDATE_MENU] = lambda wparam, lparam: self._refresh()
+        self._icon_state = "none"
+        self._menu_signature = None
+        self._menu_built = 0.0
         self.window = DevicesWindow(self.engine, _icon_image("idle"))
         self.bug_report = BugReportWindow(self.engine, _icon_image("idle"))
         self._last_message = None
+        self.update: updater.Release | None = None  # a newer version on the server
+        self._updating = False
+        self._after_exit = None  # e.g. start the next copy once this one has let go of the adapter
 
     def run(self) -> None:
+        realtime.boost_process()
         self.engine.start()
+        threading.Thread(target=self._update_watch, name="update-check", daemon=True).start()
         self.icon.run()
+        if self._after_exit:
+            self._after_exit()
 
     # ------------------------------------------------------------------ state -> UI
     def _on_change(self) -> None:
+        """Called on the engine's thread, which also streams the audio: keep it cheap. Drawing the
+        icon and rebuilding the menu (which lists adapters from the registry) happen on the tray's
+        thread, and only when something other than the once-a-second bitrate changed."""
         s = self.engine.status
-        state = "streaming" if s.streaming else ("idle" if s.adapter and not s.adapter_problem else "none")
-        self.icon.icon = _icon_image(state)
         self.icon.title = self._status_line()[:127]
         if s.message and s.message != self._last_message:
             self._last_message = s.message
@@ -121,14 +140,31 @@ class TrayApp:
                 self.icon.notify(s.message, APP_NAME)
             except Exception:
                 pass
-        self._update_menu()
+        signature = (self._state(), s.streaming, s.device, s.device_name, tuple(s.codecs), s.adapter,
+                     s.adapter_problem, s.scanning, s.message, tuple(sorted(self.engine.hid.connected())))
+        if signature != self._menu_signature or time.monotonic() - self._menu_built >= MENU_REFRESH_SECONDS:
+            self._menu_signature = signature
+            self._menu_built = time.monotonic()
+            self._update_menu()
+
+    def _state(self) -> str:
+        s = self.engine.status
+        return "streaming" if s.streaming else ("idle" if s.adapter and not s.adapter_problem else "none")
+
+    def _refresh(self) -> None:
+        """On the tray thread: redraw the icon if its colour changed, then rebuild the menu."""
+        state = self._state()
+        if state != self._icon_state:
+            self._icon_state = state
+            self.icon.icon = _icon_image(state)
+        self.icon.update_menu()
 
     def _update_menu(self) -> None:
         hwnd = getattr(self.icon, "_hwnd", None)
         if hwnd and threading.current_thread() is not getattr(self.icon, "_thread", None):
             ctypes.windll.user32.PostMessageW(hwnd, WM_APP_UPDATE_MENU, 0, 0)
         else:
-            self.icon.update_menu()
+            self._refresh()
 
     def _status_line(self) -> str:
         s = self.engine.status
@@ -145,9 +181,12 @@ class TrayApp:
     # ------------------------------------------------------------------ menu
     def _menu_items(self):
         s = self.engine.status
+        update = self.update
         return (
             Item(self._status_line(), None, enabled=False),
             Menu.SEPARATOR,
+            *([Item(f"Install update {update.version}...", _background(self._install_update)), Menu.SEPARATOR]
+              if update and not self._updating else []),
             Item("Bluetooth devices...", lambda: self.window.show(), default=True),  # also a left-click
             Item("Devices", Menu(self._device_items)),
             Item("Codec", Menu(self._codec_items)),
@@ -155,10 +194,18 @@ class TrayApp:
             Item("Audio source", Menu(self._source_items)),
             Item("Mute PC speakers while streaming", self._toggle_mute,
                  checked=lambda _: self.settings.mute_speakers),
+            Item("Mice and keyboards work in admin windows", _background(self._toggle_admin),
+                 checked=lambda _: self.settings.run_as_admin),
             Menu.SEPARATOR,
             Item("Bluetooth dongle", Menu(self._adapter_items)),
             Item("Start at login", lambda: set_autostart(not autostart_enabled()),
                  checked=lambda _: autostart_enabled()),
+            Item("Updates", Menu(
+                Item(f"Version {__version__}", None, enabled=False),
+                Item("Check for updates now...", _background(self._check_now), enabled=lambda _: not self._updating),
+                Item("Check automatically", self._toggle_update_checks,
+                     checked=lambda _: self.settings.check_for_updates),
+            )),
             Item("Open log", lambda: os.startfile(LOG_FILE) if LOG_FILE.exists() else os.startfile(STATE_DIR)),
             Item("Report a bug...", lambda: self.bug_report.show()),
             Item("Quit", _background(self._quit)),
@@ -339,9 +386,110 @@ class TrayApp:
             _error(f"Couldn't restore {adapter.name}:\n{error}")
         self.engine.resume_adapter()
 
-    def _quit(self) -> None:
+    def _toggle_admin(self) -> None:
+        if not self.settings.run_as_admin:
+            if not _ask("Run Bluetooth Multicodec as administrator?\n\n"
+                        "Windows doesn't let normal apps control windows that run as administrator, so "
+                        "your Bluetooth mouse and keyboard stop working in them. Running Bluetooth "
+                        "Multicodec as administrator fixes that. (Nothing can reach Windows' own UAC "
+                        "prompts, so use the touchpad or built-in keyboard for those.)\n\n"
+                        "Windows will ask for permission once, then Bluetooth Multicodec restarts. "
+                        "Audio and mice pause for a few seconds."):
+                return
+            try:
+                elevation.install_task()
+            except Exception as error:
+                _error(f"Couldn't set up running as administrator:\n{error}")
+                return
+            self.settings.run_as_admin = True
+            self.settings.save()
+            self._after_exit = elevation.start_task
+        else:
+            if not _ask("Stop running Bluetooth Multicodec as administrator?\n\n"
+                        "Your Bluetooth mouse and keyboard won't work in windows that run as "
+                        "administrator. Bluetooth Multicodec restarts."):
+                return
+            try:
+                elevation.remove_task()
+            except Exception as error:
+                _error(f"Couldn't remove the administrator task:\n{error}")
+                return
+            self.settings.run_as_admin = False
+            self.settings.save()
+            self._after_exit = elevation.start_unelevated
+        self._quit(ask=False)
+
+    # ------------------------------------------------------------------ updates
+    def _update_watch(self) -> None:
+        """Background thread: look for a newer version shortly after startup, then twice a day."""
+        delay = UPDATE_FIRST_CHECK_SECONDS
+        while True:
+            time.sleep(delay)
+            delay = UPDATE_CHECK_SECONDS
+            if not self.settings.check_for_updates or self._updating:
+                continue
+            try:
+                found = updater.check()
+            except Exception as error:
+                logger.info(f"update check failed: {error}")
+                continue
+            if found and (self.update is None or found.version != self.update.version):
+                self.update = found
+                logger.info(f"version {found.version} is available")
+                try:
+                    self.icon.notify(f"Version {found.version} is available. Choose \"Install update\" in the "
+                                     "tray menu to install it.", APP_NAME)
+                except Exception:
+                    pass
+                self._menu_signature = None
+                self._update_menu()
+
+    def _toggle_update_checks(self) -> None:
+        self.settings.check_for_updates = not self.settings.check_for_updates
+        self.settings.save()
+
+    def _check_now(self) -> None:
+        try:
+            found = updater.check()
+        except Exception as error:
+            _error(f"Couldn't check for updates:\n{error}")
+            return
+        if not found:
+            _info(f"You have the latest version ({__version__}).")
+            return
+        self.update = found
+        self._update_menu()
+        self._install_update()
+
+    def _install_update(self) -> None:
+        release = self.update
+        if release is None or self._updating:
+            return
+        if not _ask(f"Install version {release.version}? You have {__version__}.\n\n"
+                    "Bluetooth Multicodec closes while it installs and starts again by itself. "
+                    "Audio and Bluetooth mice pause for a few seconds."):
+            return
+        self._updating = True
+        self._update_menu()
+        try:
+            self.icon.notify(f"Downloading version {release.version}...", APP_NAME)
+        except Exception:
+            pass
+        try:
+            path = updater.download(release)
+        except Exception as error:
+            self._updating = False
+            self._update_menu()
+            _error(f"The update couldn't be downloaded:\n{error}")
+            return
+        updater.run_installer(path)
+        # Leave straight away so the installer can replace our files. The adapter stays set up for
+        # us (it's the same app coming back), so don't offer to hand it back to Windows
+        self._quit(ask=False)
+
+    def _quit(self, ask: bool = True) -> None:
         # Leaving the PC's own Bluetooth on WinUSB with the app closed leaves the user with none at all
-        system = [a for a in adapters.ours() if a.instance_id == system_adapter()]
+        system = [a for a in adapters.ours() if a.instance_id == system_adapter()] if ask else []
         if system and _ask("Give this PC's Bluetooth back to Windows now?\n\n"
                            "If you don't, Windows Bluetooth stays off until Bluetooth Multicodec runs again."):
             self._hand_back(system[0])
@@ -355,4 +503,9 @@ class TrayApp:
 
 
 def main(transport: str | None = None) -> None:
+    # "Mice and keyboards work in admin windows": every normal start (Start menu, sign-in, after an
+    # update) hands over to the elevated copy and leaves. Without the task, carry on as we are
+    if Settings.load().run_as_admin and not elevation.is_admin() and elevation.task_exists():
+        if elevation.start_task():
+            return
     TrayApp(transport).run()

@@ -43,6 +43,8 @@ class Settings:
     ldac_quality: str = "auto"  # auto (best, adaptive) | hq | sq | mq (fixed)
     source: str = "system"  # "system" (loopback of the default output) or a recording device name
     mute_speakers: bool = True
+    check_for_updates: bool = True  # look for a newer version on software.incustech.app now and then
+    run_as_admin: bool = False  # restart through elevation.TASK_NAME so input reaches admin windows
     last_device: str | None = None
     devices: dict[str, str] = field(default_factory=dict)  # address -> name, for paired devices
     # address -> {"name", "le": bool, "descriptor": hex (classic), "keyboard": bool (classic)}

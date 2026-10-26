@@ -15,6 +15,8 @@ import threading
 
 import numpy as np
 
+from .realtime import audio_thread
+
 logger = logging.getLogger(__name__)
 
 S24_MAX = 8388607
@@ -187,6 +189,7 @@ class AppAudioCapture(SystemAudioCapture):
             rate //= 2
 
         def on_audio(data, frames):
+            audio_thread("Pro Audio")  # procloop's capture thread; a no-op after the first call
             stereo = np.ctypeslib.as_array(data, shape=(frames * 2,)).reshape(-1, 2).copy()
             for stage in stages:
                 stereo = stage(stereo)
