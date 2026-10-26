@@ -39,6 +39,9 @@ HIDP_SET_PROTOCOL_BOOT = 0x70
 REPORT_TYPE_INPUT = 1
 APPEARANCE_HID_CATEGORY = 0x0F  # appearance >> 6: keyboard, mouse, joystick, ...
 SCAN_INTERVAL_MS, SCAN_WINDOW_MS = 240, 48  # 20% duty: spots waking devices without starving audio
+# A passive scan normally hears some advertiser (phones, TVs, the mouse itself) every few seconds. This
+# long without one means the controller has most likely stopped scanning while we think it's on.
+SCAN_SILENCE_RESTART_S = 30
 
 
 def is_hid_advertisement(data: AdvertisingData) -> bool:
@@ -70,6 +73,10 @@ class HidHost:
         self.connecting: set[str] = set()
         self.scan_task: asyncio.Task | None = None
         self.paused = False  # while the user-driven "Add a device" scan runs
+        self.last_advert = 0.0  # loop time of the last advertisement of any kind
+        self.scan_started = 0.0
+        self.scan_failed = False
+        self.announced: set[str] = set()  # missing devices last logged as being waited for
 
     @property
     def settings(self):
@@ -112,7 +119,21 @@ class HidHost:
             missing = [a for a, info in self.known().items()
                        if info.get("le") and a not in self.links and a not in self.connecting]
             want_scan = bool(missing) and not self.paused
+            if not missing:
+                self.announced = set()
+            now = asyncio.get_running_loop().time()
             try:
+                if want_scan and device.scanning and (
+                        self.scan_failed or now - max(self.last_advert, self.scan_started) > SCAN_SILENCE_RESTART_S):
+                    # The controller can stop scanning without telling us (or a stop/start failed half
+                    # way), leaving device.scanning True: a sleeping mouse would then never be seen again
+                    logger.info("restarting the background scan (%s)", "last start/stop failed" if self.scan_failed
+                                else f"heard nothing for {SCAN_SILENCE_RESTART_S}s")
+                    try:
+                        await device.stop_scanning()
+                    except Exception:
+                        pass
+                    device.scanning = False
                 if want_scan and not device.scanning:
                     # Public own address: bonded devices send directed "reconnect" adverts to the address
                     # they paired with (we connect with our public one), and the controller drops directed
@@ -120,10 +141,18 @@ class HidHost:
                     await device.start_scanning(active=False, scan_interval=SCAN_INTERVAL_MS,
                                                 scan_window=SCAN_WINDOW_MS, filter_duplicates=False,
                                                 own_address_type=hci.OwnAddressType.PUBLIC)
+                    self.scan_started = now
+                    self.scan_failed = False
+                    if set(missing) != self.announced:  # once per change, not after every search
+                        names = ", ".join(self.known()[a].get("name", a) for a in missing)
+                        logger.info(f"waiting for {names} to wake up (background scan on)")
+                        self.announced = set(missing)
                 elif not want_scan and device.scanning and not self.paused:
                     await device.stop_scanning()
             except Exception as error:
-                logger.debug(f"background scan: {error}")
+                if not self.scan_failed:
+                    logger.warning(f"background scan: {error!r}")
+                self.scan_failed = True
 
     def _identity(self, address: hci.Address) -> str:
         if address.is_resolvable and self.device and self.device.address_resolver:
@@ -133,13 +162,15 @@ class HidHost:
         return str(address)
 
     def _on_advertisement(self, advertisement) -> None:
-        if self.paused:
-            return  # the user's "Add a device" scan owns the radio; don't cut it short
+        self.last_advert = asyncio.get_running_loop().time()
         identity = self._identity(advertisement.address)
         info = self.known().get(identity)
+        # Also while the user's "Add a device" search runs (paused): the devices window keeps searching
+        # for as long as it's open, and a paired mouse must still come back when it wakes up
         if info and info.get("le") and identity not in self.links and identity not in self.connecting:
             # Claim it now: a burst of advertisements arrives before the task first runs
             self.connecting.add(identity)
+            logger.info(f"{info.get('name', identity)} is advertising; reconnecting")
             asyncio.ensure_future(self.connect_le(identity, advertisement.address))
 
     async def connect_le(self, identity: str, current: hci.Address | None = None, pairing: bool = False) -> bool:

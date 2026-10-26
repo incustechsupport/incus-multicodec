@@ -38,6 +38,10 @@ def setup_logging(verbose: bool, to_file: bool) -> None:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if not verbose:
         logging.getLogger("bumble").setLevel(logging.WARNING)
+    # Some mice notify on characteristics we don't use (every few seconds, for as long as they're
+    # connected); Bumble warns about each one, which buried everything else in the log
+    logging.getLogger("bumble.gatt_client").addFilter(
+        lambda record: "notification with no subscriber" not in record.getMessage())
 
 
 def default_transport(explicit: str | None) -> str:
