@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from bumble import hci
 from bumble.a2dp import make_audio_source_service_sdp_records
-from bumble.avdtp import Listener, Protocol, find_avdtp_service_with_connection
+from bumble.avdtp import AVDTP_TSEP_SNK, Listener, Protocol, find_avdtp_service_with_connection
 from bumble.core import AdvertisingData, PhysicalTransport
 from bumble.device import Device, DeviceConfiguration
 from bumble.pairing import PairingConfig, PairingDelegate
@@ -36,6 +36,10 @@ FIRMWARE_DIR = APP_DIR / "firmware"
 CLASS_OF_DEVICE = 0x28010C  # computer/laptop, Audio + Capturing service bits
 ADAPTER_POLL_SECONDS = 5
 RECONNECT_SECONDS = 20
+
+
+class NotASpeaker(RuntimeError):
+    """The device can't receive audio from us (no A2DP sink), so retrying is pointless."""
 
 
 def classic_address(address: str) -> hci.Address:
@@ -288,7 +292,9 @@ class Engine:
         self._incoming_protocol = protocol
 
     async def _setup(self, connection, initiator: bool) -> None:
-        if self.connection is not None and self.connection is not connection:
+        # One setup per connection: an outgoing connect also fires the "connection" event, and two
+        # setups would open two AVDTP sessions, which speakers answer by refusing the audio channel
+        if self.connection is not None:
             return
         self.connection = connection
         address = str(connection.peer_address).split("/")[0]
@@ -298,7 +304,19 @@ class Engine:
         try:
             await connection.authenticate()
             await connection.encrypt()
-            await self._start_stream(connection)
+            await self._start_stream(connection, initiator)
+        except NotASpeaker as error:
+            # e.g. a TV that sends its sound to headphones: it will never take ours, so stop trying
+            self.settings.devices.pop(address, None)
+            if self.settings.last_device == address:
+                self.settings.last_device = None
+            self.settings.save()
+            self._want_device = None
+            self._changed(f"{name} {error}")
+            try:
+                await connection.disconnect()
+            except Exception:
+                pass
         except Exception as error:
             logger.exception("stream setup failed")
             self._changed(f"Couldn't start audio on {name}: {error}")
@@ -319,21 +337,36 @@ class Engine:
         if self._wake:
             self._wake.set()
 
-    async def _start_stream(self, connection) -> None:
-        self._incoming_protocol = None
-        await asyncio.sleep(0.5)  # give headphones that open AVDTP themselves a moment
+    async def _start_stream(self, connection, initiator: bool = True) -> None:
         protocol = getattr(self, "_incoming_protocol", None)
-        if protocol is None or protocol.l2cap_channel.connection is not connection:
+        if protocol is not None and protocol.l2cap_channel.connection is not connection:
+            protocol = None
+        if protocol is None and not initiator:
+            # The device connected to us: it usually opens AVDTP signalling itself; use its channel
+            # rather than opening a second one (two sessions make speakers refuse the audio channel)
+            for _ in range(20):
+                await asyncio.sleep(0.1)
+                protocol = getattr(self, "_incoming_protocol", None)
+                if protocol is not None and protocol.l2cap_channel.connection is connection:
+                    break
+                protocol = None
+        if protocol is None:
             version = await find_avdtp_service_with_connection(connection)
             if not version:
-                raise RuntimeError("it has no A2DP audio sink")
+                raise NotASpeaker("has no Bluetooth audio playback, so it can't play the PC's sound")
             protocol = await Protocol.connect(connection, version)
-        await protocol.discover_remote_endpoints()
+        endpoints = list(await protocol.discover_remote_endpoints())
+        if not any(e.tsep == AVDTP_TSEP_SNK for e in endpoints):
+            raise NotASpeaker(
+                "only sends audio (it's a Bluetooth audio source, like a TV that plays to headphones), so it "
+                "can't play the PC's sound. If it has a \"Bluetooth speaker\" or \"sound receive\" mode, "
+                "turn that on and pair it again.")
         sinks = selection.find_sinks(protocol)
         self.status.codecs = [c.label for c in selection.CODECS if c.key in sinks]
         key = selection.choose(sinks, self.settings.codec)
         if key is None:
-            raise RuntimeError(f"it doesn't support {selection.BY_KEY[self.settings.codec].label}")
+            wanted = "a codec" if self.settings.codec == "auto" else selection.BY_KEY[self.settings.codec].label
+            raise RuntimeError(f"it doesn't support {wanted} Bluetooth Multicodec can send")
 
         caps = selection.codec_info(sinks[key])
         self.capture = self._open_capture()

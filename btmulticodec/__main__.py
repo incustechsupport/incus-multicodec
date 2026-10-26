@@ -244,6 +244,11 @@ def cmd_play(args) -> None:
     async def work(device):
         connection = await _connect(device, args.address)
         protocol, endpoints, sinks = await _protocol(connection)
+        from bumble.avdtp import AVDTP_TSEP_SNK
+        if not any(e.tsep == AVDTP_TSEP_SNK for e in endpoints):
+            raise SystemExit("this device only sends audio (a Bluetooth audio source, like a TV that plays to "
+                             "headphones), so it can't play the PC's sound; turn on its Bluetooth speaker / "
+                             "sound-receive mode if it has one")
         key = selection.choose(sinks, args.codec)
         if key is None:
             offered = ", ".join(str(selection.codec_info(e)) for e in endpoints)
