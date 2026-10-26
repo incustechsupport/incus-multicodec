@@ -62,7 +62,7 @@ class LdacSession(Session):
     @property
     def mode(self) -> str:
         name = ldac.EQMID_NAMES.get(self.encoder.eqmid, str(self.encoder.eqmid))
-        return f"LDAC {name}{' (auto)' if self.adaptive else ''}"
+        return f"LDAC {name}{' (best quality)' if self.adaptive else ''}"
 
     def encode(self, pcm: bytes) -> list[bytes]:
         payload, frames = self.encoder.encode(pcm)

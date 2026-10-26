@@ -197,13 +197,19 @@ class TrayApp:
                 self.settings.save()
                 self.engine.restream()
             return action
-        return [Item("Best available", choose("auto"), checked=lambda _: self.settings.codec == "auto", radio=True)] + [
+        return [Item("Best quality available (recommended)", choose("auto"),
+                     checked=lambda _: self.settings.codec == "auto", radio=True)] + [
             Item(c.label, choose(c.key), radio=True, checked=(lambda k: lambda _: self.settings.codec == k)(c.key))
             for c in selection.CODECS
         ]
 
     def _quality_items(self):
-        labels = {"auto": "Adaptive (recommended)", "hq": "990 kbps", "sq": "660 kbps", "mq": "330 kbps"}
+        labels = {
+            "auto": "Best quality: 990 kbps, steps down only if the signal can't keep up (recommended)",
+            "hq": "Always 990 kbps (may drop out on a weak signal)",
+            "sq": "Always 660 kbps",
+            "mq": "Always 330 kbps",
+        }
 
         def choose(key):
             def action():

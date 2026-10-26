@@ -37,8 +37,10 @@ def set_system_adapter(instance_id: str | None) -> None:
 
 @dataclass
 class Settings:
+    # Highest quality by default: the best codec the device has, and for LDAC 990 kbps whenever the link
+    # holds it (libldac's adaptive mode steps down only under real congestion and climbs back up)
     codec: str = "auto"  # auto | ldac | aptx-hd | aptx | aac | aptx-ll | sbc
-    ldac_quality: str = "auto"  # auto | hq | sq | mq
+    ldac_quality: str = "auto"  # auto (best, adaptive) | hq | sq | mq (fixed)
     source: str = "system"  # "system" (loopback of the default output) or a recording device name
     mute_speakers: bool = True
     last_device: str | None = None

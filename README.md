@@ -19,14 +19,14 @@ Windows apps ──► default output ──(WASAPI loopback)──► Bluetooth
 
 | Codec | Encoder | Rates | Bitrate @48k | Notes |
 |---|---|---|---|---|
-| LDAC | Sony `libldac` (Apache-2.0) | 44.1–96 kHz | 990/660/330 kbps | adaptive by default, 24-bit input |
+| LDAC | Sony `libldac` (Apache-2.0) | 44.1–96 kHz | 990/660/330 kbps | best quality by default: 990 kbps whenever the link holds it, 24-bit input |
 | aptX HD | `libfreeaptx` (LGPL-2.1) | 44.1/48 kHz | 576 kbps | 24-bit, RTP framed |
 | aptX | `libfreeaptx` | 44.1/48 kHz | 384 kbps | raw codewords, no RTP |
 | AAC | Windows' Media Foundation encoder | 44.1/48 kHz | up to 192 kbps CBR | LATM framed; not on Windows "N" without the Media Feature Pack |
 | aptX LL | `libfreeaptx` | 44.1/48 kHz | 384 kbps | aptX bitstream in ~4 ms packets |
 | SBC | BlueZ `libsbc` (LGPL-2.1) | 44.1/48 kHz | ~328 kbps | bitpool 53, for everything else |
 
-"Best available" picks LDAC > aptX HD > aptX > AAC > aptX LL > SBC from what the headphones offer.
+"Best quality available" (the default) picks LDAC > aptX HD > aptX > AAC > aptX LL > SBC from what the headphones offer.
 AAC uses the encoder built into Windows, which Microsoft has licensed, so Bluetooth Multicodec ships no AAC code.
 
 ## Dongles
