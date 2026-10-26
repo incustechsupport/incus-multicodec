@@ -114,8 +114,12 @@ class HidHost:
             want_scan = bool(missing) and not self.paused
             try:
                 if want_scan and not device.scanning:
+                    # Public own address: bonded devices send directed "reconnect" adverts to the address
+                    # they paired with (we connect with our public one), and the controller drops directed
+                    # adverts addressed to anyone else
                     await device.start_scanning(active=False, scan_interval=SCAN_INTERVAL_MS,
-                                                scan_window=SCAN_WINDOW_MS, filter_duplicates=False)
+                                                scan_window=SCAN_WINDOW_MS, filter_duplicates=False,
+                                                own_address_type=hci.OwnAddressType.PUBLIC)
                 elif not want_scan and device.scanning and not self.paused:
                     await device.stop_scanning()
             except Exception as error:

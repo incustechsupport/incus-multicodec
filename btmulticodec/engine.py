@@ -105,8 +105,9 @@ class Engine:
     def disconnect(self) -> None:
         self._call(self._disconnect_request())
 
-    def scan(self, seconds: int = 10) -> None:
-        self._call(self._scan(seconds))
+    def scan(self, seconds: int = 10, fresh: bool = True) -> None:
+        """Search for devices; fresh=False keeps what earlier searches found (continuous searching)."""
+        self._call(self._scan(seconds, fresh))
 
     def pair(self, address: str, name: str | None = None) -> None:
         self._call(self._pair(address, name))
@@ -429,12 +430,14 @@ class Engine:
             self._want_device = address
             self._wake.set()
 
-    async def _scan(self, seconds: int) -> None:
+    async def _scan(self, seconds: int, fresh: bool = True) -> None:
         if self.device is None or self.status.scanning:
             return
-        self.status.scanning, self.status.found, self.status.found_kind = True, {}, {}
-        self.status.found_rssi = {}
-        self._changed("Searching for headphones, speakers, mice and keyboards... (put them in pairing mode)")
+        self.status.scanning = True
+        classic = True
+        if fresh:
+            self.status.found, self.status.found_kind, self.status.found_rssi = {}, {}, {}
+            self._changed("Searching for headphones, speakers, mice and keyboards... (put them in pairing mode)")
 
         def add(key, name, kind, rssi=None):
             if rssi is not None:
@@ -464,11 +467,16 @@ class Engine:
                 await self.device.stop_scanning()
             if self.device.le_enabled:
                 await self.device.start_scanning(active=True)
-            await self.device.start_discovery()
+            # A Classic inquiry takes most of the radio's time and makes streamed audio stutter: repeat
+            # (non-fresh) searches skip it while music plays; LE scanning (mice, keyboards) is cheap
+            classic = fresh or self.stream is None
+            if classic:
+                await self.device.start_discovery()
             await asyncio.sleep(seconds)
         finally:
             # Never leave a full-duty scan running: it starves the radio while audio streams
-            for stop in (self.device.stop_discovery, self.device.stop_scanning if self.device.le_enabled else None):
+            for stop in (self.device.stop_discovery if classic else None,
+                         self.device.stop_scanning if self.device.le_enabled else None):
                 if stop is None:
                     continue
                 try:
@@ -479,7 +487,10 @@ class Engine:
             self.device.remove_listener("advertisement", on_advertisement)
             self.hid.paused = False
             self.status.scanning = False
-            self._changed(f"Found {len(self.status.found)} device(s)")
+            if fresh:
+                self._changed(f"Found {len(self.status.found)} device(s)")
+            else:
+                self._changed_soon()
 
     async def _pair(self, address: str, name: str | None) -> None:
         kind = self.status.found_kind.get(address, "audio")

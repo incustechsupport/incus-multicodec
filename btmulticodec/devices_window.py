@@ -72,6 +72,7 @@ class DevicesWindow:
         self._bring_to_front()
         self._search()
         root.after(REFRESH_MS, self._tick)
+        root.after(SEARCH_SECONDS * 1000 + 1500, self._keep_searching)
         root.mainloop()
         # Tk objects must die on this thread: Tcl aborts the process ("Tcl_AsyncDelete: async handler
         # deleted by the wrong thread") if Python's GC frees them from another one later
@@ -222,10 +223,11 @@ class DevicesWindow:
         self.message_var.set(s.message or "")
         self._sync(self.mine, self._my_devices())
         self._sync(self.nearby, self._nearby_devices())
-        if s.scanning:
-            self.search_var.set("Searching...")
+        if not self.nearby.get_children():
+            self.search_var.set("Searching... put the device in pairing mode" if s.scanning
+                                else "Nothing found yet. Is the device in pairing mode?")
         else:
-            self.search_var.set("" if self.nearby.get_children() else "Nothing found. Is the device in pairing mode?")
+            self.search_var.set("Searching..." if s.scanning else "")
         self._update_buttons()
         self.root.after(REFRESH_MS, self._tick)
 
@@ -269,9 +271,19 @@ class DevicesWindow:
         if address:
             self.engine.pair(address, self.nearby.item(address, "text"))
 
-    def _search(self) -> None:
+    def _search(self, fresh: bool = True) -> None:
         if self.engine.device is not None and not self.engine.status.scanning:
-            self.engine.scan(SEARCH_SECONDS)
+            self.engine.scan(SEARCH_SECONDS, fresh=fresh)
+            self.searching = True
         elif self.engine.device is None and self.root is not None:
             # Bluetooth still starting: try again shortly
-            self.root.after(2000, self._search)
+            self.root.after(2000, lambda: self._search(fresh))
+
+    def _keep_searching(self) -> None:
+        """While the window is open, search continuously (keeping results) so a device can be put in
+        pairing mode at any time. Pauses while the window is hidden."""
+        if self.root is None:
+            return
+        if self.root.state() != "withdrawn" and not self.engine.status.scanning:
+            self._search(fresh=False)
+        self.root.after(1500, self._keep_searching)
