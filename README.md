@@ -97,3 +97,8 @@ Logs: `%LOCALAPPDATA%\windows-bluetooth-multicodec\multicodec.log`. Settings and
 - One audio device at a time.
 - Lip-sync: LDAC/aptX add ~150–250 ms like on any platform; aptX LL is the low-latency option.
 - See THIRD_PARTY_NOTICES.md for licences and trademarks.
+
+## Licence
+
+MIT (see LICENSE) for this project's own code. Bundled third-party components keep their own
+licences; see THIRD_PARTY_NOTICES.md.
