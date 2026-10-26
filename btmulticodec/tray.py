@@ -24,6 +24,10 @@ APP_NAME = "Windows Bluetooth Multicodec"
 RUN_VALUE = "windows-bluetooth-multicodec"  # autostart entry name
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 MB_YESNO, MB_ICONWARNING, MB_ICONERROR, IDYES = 0x04, 0x30, 0x10, 6
+# A box opened from a tray app has no window of its own to sit on; without these it can open
+# behind other windows or without input focus
+MB_SETFOREGROUND, MB_TOPMOST = 0x00010000, 0x00040000
+WM_APP_UPDATE_MENU = 0x8000 + 0x101  # WM_APP-range message: rebuild the menu on the tray's own thread
 
 
 def _icon_image(state: str) -> Image.Image:
@@ -38,11 +42,26 @@ def _icon_image(state: str) -> Image.Image:
 
 
 def _ask(text: str, title: str = APP_NAME) -> bool:
-    return ctypes.windll.user32.MessageBoxW(None, text, title, MB_YESNO | MB_ICONWARNING) == IDYES
+    """Blocking Yes/No box. Never call it on the tray thread: use it from a _background action."""
+    flags = MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST
+    return ctypes.windll.user32.MessageBoxW(None, text, title, flags) == IDYES
 
 
 def _error(text: str) -> None:
-    ctypes.windll.user32.MessageBoxW(None, text, APP_NAME, MB_ICONERROR)
+    ctypes.windll.user32.MessageBoxW(None, text, APP_NAME, MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST)
+
+
+def _background(action):
+    """Run a menu action on its own thread.
+
+    pystray calls menu actions from inside the tray window's message handler, straight after the
+    popup menu closes. A message box opened there never gets real mouse/keyboard input (it can't be
+    clicked or closed), and anything slow freezes the tray. So actions that ask, wait or do I/O run
+    on a worker thread, where MessageBox gets its own modal message loop.
+    """
+    def start(*_):
+        threading.Thread(target=action, name="tray-action", daemon=True).start()
+    return start
 
 
 def _launch_command() -> str:
@@ -77,6 +96,9 @@ class TrayApp:
         self.settings = Settings.load()
         self.engine = Engine(self.settings, on_change=self._on_change, transport=transport)
         self.icon = pystray.Icon("windows-bluetooth-multicodec", _icon_image("none"), APP_NAME, menu=Menu(self._menu_items))
+        # pystray's update_menu() rebuilds (and destroys) the menu on the calling thread; the engine
+        # calls in from its own thread, so hop over to the tray thread first
+        self.icon._message_handlers[WM_APP_UPDATE_MENU] = lambda wparam, lparam: self.icon.update_menu()
         self._last_message = None
 
     def run(self) -> None:
@@ -95,7 +117,14 @@ class TrayApp:
                 self.icon.notify(s.message, APP_NAME)
             except Exception:
                 pass
-        self.icon.update_menu()
+        self._update_menu()
+
+    def _update_menu(self) -> None:
+        hwnd = getattr(self.icon, "_hwnd", None)
+        if hwnd and threading.current_thread() is not getattr(self.icon, "_thread", None):
+            ctypes.windll.user32.PostMessageW(hwnd, WM_APP_UPDATE_MENU, 0, 0)
+        else:
+            self.icon.update_menu()
 
     def _status_line(self) -> str:
         s = self.engine.status
@@ -126,7 +155,7 @@ class TrayApp:
             Item("Start at login", lambda: set_autostart(not autostart_enabled()),
                  checked=lambda _: autostart_enabled()),
             Item("Open log", lambda: os.startfile(LOG_FILE) if LOG_FILE.exists() else os.startfile(STATE_DIR)),
-            Item("Quit", self._quit),
+            Item("Quit", _background(self._quit)),
         )
 
     def _device_items(self):
@@ -139,7 +168,7 @@ class TrayApp:
                 Item("Disconnect" if connected else "Connect",
                      (lambda a: lambda: self.engine.disconnect())(address) if connected
                      else (lambda a: lambda: self.engine.connect(a))(address)),
-                Item("Forget", (lambda a, n: lambda: _ask(f"Forget {n}?") and self.engine.forget(a))(address, name)),
+                Item("Forget", _background((lambda a, n: lambda: _ask(f"Forget {n}?") and self.engine.forget(a))(address, name))),
             ), checked=(lambda c: lambda _: c)(connected)))
         hid_connected = self.engine.hid.connected()
         if self.settings.hid_devices:
@@ -149,8 +178,8 @@ class TrayApp:
             for address, info in sorted(self.settings.hid_devices.items(), key=lambda kv: kv[1]["name"].lower()):
                 connected = address in hid_connected
                 items.append(Item(info["name"] if connected else f"{info['name']}  (asleep or off)", Menu(
-                    Item("Forget", (lambda a, n: lambda: _ask(f"Forget {n}?") and self.engine.forget(a))(
-                        address, info["name"])),
+                    Item("Forget", _background((lambda a, n: lambda: _ask(f"Forget {n}?") and self.engine.forget(a))(
+                        address, info["name"]))),
                 ), checked=(lambda c: lambda _: c)(connected)))
         if items:
             items.append(Menu.SEPARATOR)
@@ -217,7 +246,7 @@ class TrayApp:
             if a.ours:
                 items.append(Item(f"{a.name}: used by Bluetooth Multicodec ({chip}, {verdict})", Menu(
                     Item(why, None, enabled=False),
-                    Item("Give back to Windows", (lambda ad: lambda: self._give_back(ad))(a)))))
+                    Item("Give back to Windows", _background((lambda ad: lambda: self._give_back(ad))(a))))))
             else:
                 problem = adapters.takeover_problem(a, found)
                 owner = "Windows" if a.windows_owned else "not in use"
@@ -229,7 +258,7 @@ class TrayApp:
                         label = f"Use this PC's own Bluetooth ({a.name}){mark} – turns Windows Bluetooth off..."
                     else:
                         label = f"Use {a.name} ({chip}{mark}) for Bluetooth Multicodec..."
-                    items.append(Item(label, (lambda ad, fd: lambda: self._take_over(ad, fd))(a, found)))
+                    items.append(Item(label, _background((lambda ad, fd: lambda: self._take_over(ad, fd))(a, found))))
         if not any(a.ours for a in found) and not any(not adapters.takeover_problem(a, found) for a in found):
             items.append(Item("Plug in a USB Bluetooth dongle to use with Bluetooth Multicodec", None, enabled=False))
         elif not any(a.ours or not adapters.is_system_adapter(a, found) for a in found):
