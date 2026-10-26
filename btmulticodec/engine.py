@@ -396,7 +396,7 @@ class Engine:
 
     def _open_capture(self):
         if self.settings.source == "system":
-            return capture.SystemAudioCapture(mute_speakers=self.settings.mute_speakers)
+            return capture.open_system_audio(mute_speakers=self.settings.mute_speakers)
         return capture.DeviceCapture(self.settings.source)
 
     def _teardown_capture(self) -> None:

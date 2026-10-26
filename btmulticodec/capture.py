@@ -7,7 +7,10 @@ which lets us mute the PC's own speakers while streaming and apply Windows' volu
 
 from __future__ import annotations
 
+import ctypes
 import logging
+import os
+import pathlib
 import threading
 
 import numpy as np
@@ -153,6 +156,74 @@ class SystemAudioCapture:
     def close(self) -> None:
         self.stop()
         self.audio.terminate()
+
+
+class AppAudioCapture(SystemAudioCapture):
+    """Everything apps play, captured *before* the output device's effects (Windows process loopback).
+
+    The speaker loopback above is taken after the laptop speaker's processing, which on many laptops
+    includes a steep bass cut (measured here: -19 dB at 100 Hz, -47 dB at 41 Hz). Process loopback with
+    our own process excluded gets the apps' mix unprocessed: full-range audio, no driver, no install.
+    Needs Windows 10 2004+; use SystemAudioCapture where it can't start.
+    """
+
+    DLL_PATH = pathlib.Path(__file__).parent / "bin" / "procloop.dll"
+    _CALLBACK = ctypes.CFUNCTYPE(None, ctypes.POINTER(ctypes.c_float), ctypes.c_int)
+
+    def __init__(self, mute_speakers: bool = True):
+        super().__init__(mute_speakers)
+        self.dll = ctypes.CDLL(str(self.DLL_PATH))
+        self.dll.procloop_start.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_int, self._CALLBACK]
+        self.dll.procloop_start.restype = ctypes.c_int
+        self.name = f"apps' audio (before {self.render['name']} effects)"
+        self._callback = None
+
+    def start(self, chunk_frames: int, on_chunk) -> None:
+        rechunk = _Rechunker(chunk_frames, on_chunk)
+        stages = []
+        rate = self.device_rate
+        while rate > self.rate:
+            stages.append(HalfBand(2))
+            rate //= 2
+
+        def on_audio(data, frames):
+            stereo = np.ctypeslib.as_array(data, shape=(frames * 2,)).reshape(-1, 2).copy()
+            for stage in stages:
+                stereo = stage(stereo)
+            rechunk.push(stereo * self._gain)
+
+        # Keep the ctypes callback alive for as long as the DLL may call it
+        self._callback = self._CALLBACK(on_audio)
+        # Capture at the Windows mix rate (decimated above if the codec needs less); the DLL emits
+        # silence while nothing plays, so no keep-alive stream is needed
+        hr = self.dll.procloop_start(os.getpid(), self.device_rate, 2, self._callback)
+        if hr:
+            # e.g. Windows older than 10 2004: fall back to the speaker loopback (after its effects)
+            logger.warning(f"process loopback unavailable (HRESULT 0x{hr & 0xFFFFFFFF:08X}); "
+                           "capturing after the speaker's effects instead")
+            self._fallback = True
+            super().start(chunk_frames, on_chunk)
+            return
+        self._fallback = False
+        self._stop.clear()
+        threading.Thread(target=self._volume_follower, name="volume", daemon=True).start()
+        logger.info(f"capturing apps' audio (process loopback) at {self.device_rate} Hz -> {self.rate} Hz")
+
+    def stop(self) -> None:
+        if getattr(self, "_fallback", False):
+            super().stop()
+            return
+        self._stop.set()
+        self.dll.procloop_stop()
+
+
+def open_system_audio(mute_speakers: bool = True):
+    """The best way to capture "everything Windows plays" on this PC."""
+    try:
+        return AppAudioCapture(mute_speakers)
+    except OSError as error:
+        logger.warning(f"process loopback not available ({error}); using speaker loopback")
+        return SystemAudioCapture(mute_speakers)
 
 
 class DeviceCapture:

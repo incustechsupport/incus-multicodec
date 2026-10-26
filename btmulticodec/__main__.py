@@ -183,6 +183,13 @@ def cmd_selftest(_args) -> None:
             failed = True
             print(f"  FAIL  {name:9} {error}")
     print(f"  {'ok' if (adapters.BIN / 'wdi-simple.exe').is_file() else 'FAIL'}    WinUSB installer (wdi-simple.exe)")
+    try:
+        import ctypes
+        ctypes.CDLL(str(adapters.BIN / "procloop.dll")).procloop_start
+        print("  ok    app-audio capture before speaker effects (procloop.dll)")
+    except (OSError, AttributeError) as error:
+        failed = True
+        print(f"  FAIL  app-audio capture (procloop.dll): {error}")
     if failed:
         raise SystemExit(1)
 
@@ -254,7 +261,7 @@ def cmd_play(args) -> None:
             offered = ", ".join(str(selection.codec_info(e)) for e in endpoints)
             raise SystemExit(f"no {args.codec} sink on this device (it offers: {offered})")
         caps = selection.codec_info(sinks[key])
-        source = (capture.SystemAudioCapture(mute_speakers=not args.no_mute) if args.source == "system"
+        source = (capture.open_system_audio(mute_speakers=not args.no_mute) if args.source == "system"
                   else capture.DeviceCapture(args.source))
         rate = source.output_rate(selection.sample_rates(key, caps))
         configuration = selection.configure(key, caps, rate)

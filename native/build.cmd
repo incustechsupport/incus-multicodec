@@ -52,3 +52,9 @@ cl /nologo /O2 /LD /W3 /MT /EHsc "%~dp0aacmf.cpp" /Fo"%OBJ%\\" /Fe"%OUT%\aacmf.d
 if errorlevel 1 (type "%LOG%" & echo BUILD FAILED, see %LOG% & exit /b 1)
 del "%OUT%\aacmf.exp" "%OUT%\aacmf.lib" 2>nul
 echo built %OUT%\aacmf.dll
+
+rem Process-loopback capture (apps' audio before the speaker's effects): our own code, Windows APIs only
+cl /nologo /O2 /LD /W3 /MT /EHsc /std:c++17 "%~dp0procloop.cpp" /Fo"%OBJ%\\" /Fe"%OUT%\procloop.dll" > "%LOG%" 2>&1
+if errorlevel 1 (type "%LOG%" & echo BUILD FAILED, see %LOG% & exit /b 1)
+del "%OUT%\procloop.exp" "%OUT%\procloop.lib" 2>nul
+echo built %OUT%\procloop.dll
