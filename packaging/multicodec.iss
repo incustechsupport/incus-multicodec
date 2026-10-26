@@ -2,7 +2,7 @@
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\multicodec.iss
 ; Per-user install (no admin); admin rights are only asked for when a dongle is switched to WinUSB.
 
-#define AppVersion "0.1.0"
+#define AppVersion "0.1.1"
 
 [Setup]
 AppId={{6F6E7C1A-3C7B-4C7E-9B8B-1D2A0C5E7A10}

@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw
 from pystray import Menu, MenuItem as Item
 
 from . import adapters, capture, selection
+from .bugreport import BugReportWindow
 from .devices_window import DevicesWindow
 from .engine import Engine
 from .settings import LOG_FILE, STATE_DIR, Settings, set_system_adapter, system_adapter
@@ -101,6 +102,7 @@ class TrayApp:
         # calls in from its own thread, so hop over to the tray thread first
         self.icon._message_handlers[WM_APP_UPDATE_MENU] = lambda wparam, lparam: self.icon.update_menu()
         self.window = DevicesWindow(self.engine, _icon_image("idle"))
+        self.bug_report = BugReportWindow(self.engine, _icon_image("idle"))
         self._last_message = None
 
     def run(self) -> None:
@@ -158,6 +160,7 @@ class TrayApp:
             Item("Start at login", lambda: set_autostart(not autostart_enabled()),
                  checked=lambda _: autostart_enabled()),
             Item("Open log", lambda: os.startfile(LOG_FILE) if LOG_FILE.exists() else os.startfile(STATE_DIR)),
+            Item("Report a bug...", lambda: self.bug_report.show()),
             Item("Quit", _background(self._quit)),
         )
 
@@ -343,6 +346,7 @@ class TrayApp:
                            "If you don't, Windows Bluetooth stays off until Bluetooth Multicodec runs again."):
             self._hand_back(system[0])
         self.window.close()
+        self.bug_report.close()
         try:
             self.engine.shutdown()
         except Exception:
