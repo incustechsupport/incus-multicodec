@@ -1,0 +1,7 @@
+LIBRARY aptx
+EXPORTS
+    aptx_init
+    aptx_reset
+    aptx_finish
+    aptx_encode
+    aptx_encode_finish

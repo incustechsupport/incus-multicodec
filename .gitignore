@@ -1,0 +1,8 @@
+.venv/
+build/
+dist/
+third_party/
+btmulticodec/bin/
+firmware/
+native/*.log
+__pycache__/

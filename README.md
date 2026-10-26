@@ -1,0 +1,99 @@
+# Windows Bluetooth Multicodec
+
+High-quality Bluetooth audio for Windows 10/11: **LDAC, aptX HD, aptX, AAC, aptX Low Latency and SBC**,
+streamed through a cheap dedicated USB Bluetooth dongle. Windows keeps its own Bluetooth adapter
+for mice, keyboards, phones and Phone Link; Bluetooth Multicodec never touches it.
+
+```
+Windows apps ──► default output ──(WASAPI loopback)──► Bluetooth Multicodec ──► encoder ──► USB dongle (WinUSB) ──► headphones
+                  (PC speakers muted while streaming)            LDAC/aptX/SBC      Bumble Bluetooth stack
+```
+
+- No virtual sound card and no kernel driver: audio is captured with WASAPI loopback, which is
+  taken before Windows' mute/volume. Bluetooth Multicodec mutes the PC speakers while it streams and applies
+  the Windows volume itself.
+- The dongle is switched to Microsoft's inbox WinUSB driver with libwdi (the engine behind
+  Zadig). That works with Secure Boot on and needs no paid driver signing.
+
+## Codecs
+
+| Codec | Encoder | Rates | Bitrate @48k | Notes |
+|---|---|---|---|---|
+| LDAC | Sony `libldac` (Apache-2.0) | 44.1–96 kHz | 990/660/330 kbps | adaptive by default, 24-bit input |
+| aptX HD | `libfreeaptx` (LGPL-2.1) | 44.1/48 kHz | 576 kbps | 24-bit, RTP framed |
+| aptX | `libfreeaptx` | 44.1/48 kHz | 384 kbps | raw codewords, no RTP |
+| AAC | Windows' Media Foundation encoder | 44.1/48 kHz | up to 192 kbps CBR | LATM framed; not on Windows "N" without the Media Feature Pack |
+| aptX LL | `libfreeaptx` | 44.1/48 kHz | 384 kbps | aptX bitstream in ~4 ms packets |
+| SBC | BlueZ `libsbc` (LGPL-2.1) | 44.1/48 kHz | ~328 kbps | bitpool 53, for everything else |
+
+"Best available" picks LDAC > aptX HD > aptX > AAC > aptX LL > SBC from what the headphones offer.
+AAC uses the encoder built into Windows, which Microsoft has licensed, so Bluetooth Multicodec ships no AAC code.
+
+## Dongles
+
+What matters is the chip inside, not the brand. Bluetooth Multicodec checks it before switching a dongle over
+(`bt-multicodec-cli adapters`, or the tray's *Bluetooth dongle* menu):
+
+| Verdict | Chips |
+|---|---|
+| **Supported** | Realtek RTL8761B/BU/BUV/CU/CUV and other Realtek parts with known firmware (TP-Link UB500, ASUS BT500, Edimax, most "Bluetooth 5.0/5.1 USB" dongles); Intel AX200/AX201/AX210/AX211/BE200 as a second adapter |
+| **May be unreliable** | CSR8510 A10 (`0a12:0001`, clones common); Broadcom BCM20702 (ASUS BT400, Plugable), run without their firmware patch |
+| **Not supported** | MediaTek, Qualcomm Atheros, Barrot and Actions chips (many no-name "Bluetooth 5.3/5.4" dongles); older Intel; Realtek models without known firmware |
+| **Untested** | anything else: works if the chip needs no firmware upload |
+
+"Supported" means Bumble's driver tables list that exact USB ID and the firmware is bundled.
+Dongles that appear as USB *sound cards* (Creative BT-W5, Avantree DG80) are not Bluetooth
+adapters; they do aptX themselves and don't need Bluetooth Multicodec.
+
+Bluetooth Multicodec refuses to take over a built-in adapter, Windows' only adapter, or an adapter whose
+USB ID matches another one plugged in (the WinUSB binding is per USB ID).
+
+## Using it
+
+1. Plug in the dongle, start **Bluetooth Multicodec** (tray icon) → *Bluetooth dongle* → *Use … for Bluetooth Multicodec*
+   (one UAC prompt).
+2. *Devices* → *Add a device…* with the headphones in pairing mode → *Pair …*.
+3. Play anything. The headphones reconnect automatically next time.
+
+*Bluetooth dongle* → *Give back to Windows* undoes step 1 (so does uninstalling).
+
+## Building from source
+
+Requires Visual Studio 2022+ with C++ tools, Python 3.13, Git.
+
+```
+python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
+git clone --depth 1 https://android.googlesource.com/platform/external/libldac third_party\libldac
+git clone --depth 1 https://github.com/iamthehorker/libfreeaptx                third_party\libfreeaptx
+git clone --depth 1 https://git.kernel.org/pub/scm/bluetooth/sbc.git          third_party\sbc
+git clone --depth 1 https://github.com/pbatard/libwdi                         third_party\libwdi
+:: WDK 8.0 redistributable (WinUSB co-installers needed by libwdi's INF template):
+::   download https://go.microsoft.com/fwlink/p/?LinkID=253170 (wdfcoinstaller.msi), then
+msiexec /a wdfcoinstaller.msi /qn TARGETDIR=%CD%\third_party\wdk8
+native\build.cmd          :: ldac.dll, aptx.dll, sbc.dll
+native\build-wdi.cmd      :: wdi-simple.exe
+.venv\Scripts\python -m bumble.tools.intel_fw_download --output-dir firmware\intel
+.venv\Scripts\python -m btmulticodec selftest
+.venv\Scripts\pyinstaller packaging\multicodec.spec --noconfirm     :: dist\windows-bluetooth-multicodec\
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\multicodec.iss   :: dist\windows-bluetooth-multicodec-setup-*.exe
+```
+
+Realtek firmware: Bumble's `rtk_fw_download` tool has a broken import in 0.0.236; run it with a
+`PYTHONPATH` shim providing `tools/rtk_util.py` = `from bumble.tools.rtk_util import *`.
+
+From Git Bash, run the `.cmd` scripts as `cmd //c 'native\build.cmd'`.
+
+## Command line
+
+`bt-multicodec-cli.exe` (or `python -m btmulticodec`): `adapters`, `setup-adapter <vid:pid>`,
+`release-adapter`, `info`, `scan`, `pair <addr>`, `codecs <addr>`,
+`play <addr> [--codec …] [--quality …] [--source system|"CABLE Output"]`, `selftest`.
+
+Logs: `%LOCALAPPDATA%\windows-bluetooth-multicodec\multicodec.log`. Settings and pairings live in the same folder.
+
+## Limits
+
+- Audio only (A2DP source). Calls/microphone (HFP) are not supported.
+- One audio device at a time.
+- Lip-sync: LDAC/aptX add ~150–250 ms like on any platform; aptX LL is the low-latency option.
+- See THIRD_PARTY_NOTICES.md for licences and trademarks.

@@ -1,0 +1,12 @@
+bumble==0.0.236
+libusb-package==1.0.26.4
+libusb1==3.4.0
+pyusb==1.3.1
+numpy==2.5.4
+sounddevice==0.5.6
+PyAudioWPatch==0.2.12.9
+pycaw==20260927
+comtypes==1.4.17
+pystray==0.19.5
+pillow==13.0.0
+pyinstaller==6.22.3
