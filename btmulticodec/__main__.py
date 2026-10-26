@@ -21,7 +21,7 @@ import os
 import sys
 
 from . import adapters, ldac, selection
-from .settings import LOG_FILE, STATE_DIR, Settings
+from .settings import LOG_FILE, STATE_DIR, Settings, set_system_adapter
 
 log = logging.getLogger("btmulticodec")
 
@@ -79,9 +79,7 @@ def cmd_setup_adapter(args) -> None:
     if system and not args.yes and not args.force:
         raise SystemExit(f"{adapters.SYSTEM_ADAPTER_WARNING}\n\nRe-run with --yes to go ahead.")
     adapters.take_over(adapter, force=args.force)
-    settings = Settings.load()
-    settings.system_adapter = adapter.instance_id if system else None
-    settings.save()
+    set_system_adapter(adapter.instance_id if system else None)
     print(f"{adapter.name} is now set up for Bluetooth Multicodec")
 
 

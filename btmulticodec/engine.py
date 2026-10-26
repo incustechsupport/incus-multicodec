@@ -83,6 +83,7 @@ class Engine:
         self._want_device: str | None = settings.last_device
         self._wake = None  # asyncio.Event, created on the loop
         self.hid = HidHost(self)
+        self._pending_change = None  # asyncio.TimerHandle for _changed_soon
 
     # ------------------------------------------------------------------ public (any thread)
     def start(self) -> None:
@@ -124,6 +125,14 @@ class Engine:
         except Exception:
             logger.exception("on_change failed")
 
+    def _changed_soon(self, delay: float = 0.5) -> None:
+        """Coalesce bursts of status changes into one UI refresh."""
+        if self._pending_change is None:
+            def fire():
+                self._pending_change = None
+                self._changed()
+            self._pending_change = self.loop.call_later(delay, fire)
+
     def _thread_main(self) -> None:
         asyncio.set_event_loop(self.loop)
         self.loop.run_until_complete(self._main())
@@ -163,21 +172,12 @@ class Engine:
     async def _run_adapter(self, spec: str) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         async with await open_transport(spec) as transport:
-            config = DeviceConfiguration.from_dict({
-                "name": os.environ.get("COMPUTERNAME", "Windows PC"),
-                "class_of_device": CLASS_OF_DEVICE,
-                "classic_enabled": True,
-                "le_enabled": True,  # Bluetooth LE mice and keyboards
-                "keystore": f"JsonKeyStore:{KEYS_FILE}",
-            })
-            device = Device.from_config_with_hci(config, transport.source, transport.sink)
-            device.pairing_config_factory = lambda connection: PairingConfig(
-                sc=True, mitm=True, bonding=True, delegate=_Delegate(self))
-            device.sdp_service_records = {0x00010001: make_audio_source_service_sdp_records(0x00010001)}
-            listener = Listener.for_device(device, version=(1, 3))
-            listener.on("connection", self._on_incoming_avdtp)
-            device.on("connection", self._on_acl_connection)
-            await device.power_on()
+            try:
+                device = await self._power_on(transport, le=True)  # LE for Bluetooth LE mice and keyboards
+            except hci.HCI_Error as error:
+                # Classic-only controllers reject the LE setup; audio and Classic HID still work
+                logger.info(f"LE setup rejected ({error}); running Classic-only")
+                device = await self._power_on(transport, le=False)
             await device.set_connectable(True)
             self.device = device
             self.hid.attach(device)
@@ -194,6 +194,24 @@ class Engine:
                     await asyncio.wait_for(asyncio.shield(self._wake.wait()), RECONNECT_SECONDS)
                 except asyncio.TimeoutError:
                     pass
+
+    async def _power_on(self, transport, le: bool) -> Device:
+        config = DeviceConfiguration.from_dict({
+            "name": os.environ.get("COMPUTERNAME", "Windows PC"),
+            "class_of_device": CLASS_OF_DEVICE,
+            "classic_enabled": True,
+            "le_enabled": le,
+            "keystore": f"JsonKeyStore:{KEYS_FILE}",
+        })
+        device = Device.from_config_with_hci(config, transport.source, transport.sink)
+        device.pairing_config_factory = lambda connection: PairingConfig(
+            sc=True, mitm=True, bonding=True, delegate=_Delegate(self))
+        device.sdp_service_records = {0x00010001: make_audio_source_service_sdp_records(0x00010001)}
+        listener = Listener.for_device(device, version=(1, 3))
+        listener.on("connection", self._on_incoming_avdtp)
+        device.on("connection", self._on_acl_connection)
+        await device.power_on()
+        return device
 
     # ------------------------------------------------------------------ connections
     async def _try_connect(self, address: str) -> None:
@@ -324,10 +342,10 @@ class Engine:
         self._changed("Searching for headphones, speakers, mice and keyboards... (put them in pairing mode)")
 
         def add(key, name, kind):
-            if name or key not in self.status.found:
+            if (name and self.status.found.get(key) != name) or key not in self.status.found:
                 self.status.found[key] = name or key
                 self.status.found_kind[key] = kind
-                self._changed()
+                self._changed_soon()  # adverts repeat many times a second; batch the tray refreshes
 
         def on_inquiry(address, class_of_device, data, rssi):
             major = (class_of_device >> 8) & 0x1F
@@ -347,12 +365,15 @@ class Engine:
         try:
             if self.device.scanning:
                 await self.device.stop_scanning()
-            await self.device.start_scanning(active=True)
+            if self.device.le_enabled:
+                await self.device.start_scanning(active=True)
             await self.device.start_discovery()
             await asyncio.sleep(seconds)
         finally:
             # Never leave a full-duty scan running: it starves the radio while audio streams
-            for stop in (self.device.stop_discovery, self.device.stop_scanning):
+            for stop in (self.device.stop_discovery, self.device.stop_scanning if self.device.le_enabled else None):
+                if stop is None:
+                    continue
                 try:
                     await stop()
                 except Exception:

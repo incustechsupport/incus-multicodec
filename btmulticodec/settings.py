@@ -12,17 +12,34 @@ STATE_DIR = pathlib.Path(os.environ.get("LOCALAPPDATA", pathlib.Path.home())) / 
 SETTINGS_FILE = STATE_DIR / "settings.json"
 KEYS_FILE = STATE_DIR / "keys.json"
 LOG_FILE = STATE_DIR / "multicodec.log"
+# Instance ID of the PC's own Bluetooth adapter while we hold it (the no-dongle fallback). Kept out of
+# settings.json because the CLI's setup-adapter can write it while the tray app holds Settings in memory.
+SYSTEM_ADAPTER_FILE = STATE_DIR / "system-adapter.txt"
+
+
+def system_adapter() -> str | None:
+    try:
+        return SYSTEM_ADAPTER_FILE.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def set_system_adapter(instance_id: str | None) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if instance_id:
+        SYSTEM_ADAPTER_FILE.write_text(instance_id, encoding="utf-8")
+    else:
+        SYSTEM_ADAPTER_FILE.unlink(missing_ok=True)
 
 
 @dataclass
 class Settings:
-    codec: str = "auto"  # auto | ldac | aptx-hd | aptx | aptx-ll | sbc
+    codec: str = "auto"  # auto | ldac | aptx-hd | aptx | aac | aptx-ll | sbc
     ldac_quality: str = "auto"  # auto | hq | sq | mq
     source: str = "system"  # "system" (loopback of the default output) or a recording device name
     mute_speakers: bool = True
     last_device: str | None = None
     devices: dict[str, str] = field(default_factory=dict)  # address -> name, for paired devices
-    system_adapter: str | None = None  # instance ID, when we took the PC's own Bluetooth (no dongle)
     # address -> {"name", "le": bool, "descriptor": hex (classic), "keyboard": bool (classic)}
     hid_devices: dict[str, dict] = field(default_factory=dict)
 

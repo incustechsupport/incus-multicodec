@@ -107,7 +107,7 @@ class HidHost:
         while True:
             await asyncio.sleep(2)
             device = self.device
-            if device is None:
+            if device is None or not device.le_enabled:
                 continue
             missing = [a for a, info in self.known().items()
                        if info.get("le") and a not in self.links and a not in self.connecting]

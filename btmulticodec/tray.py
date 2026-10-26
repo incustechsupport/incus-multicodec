@@ -16,7 +16,7 @@ from pystray import Menu, MenuItem as Item
 
 from . import adapters, capture, selection
 from .engine import Engine
-from .settings import LOG_FILE, STATE_DIR, Settings
+from .settings import LOG_FILE, STATE_DIR, Settings, set_system_adapter, system_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -258,8 +258,7 @@ class TrayApp:
         def work():
             try:
                 adapters.take_over(adapter)
-                self.settings.system_adapter = adapter.instance_id if system else None
-                self.settings.save()
+                set_system_adapter(adapter.instance_id if system else None)
             except Exception as error:
                 _error(f"Couldn't set up {adapter.name}:\n{error}")
                 return
@@ -290,13 +289,12 @@ class TrayApp:
         except Exception:
             logger.exception("shutdown")
         # Leaving the PC's own Bluetooth on WinUSB with the app closed leaves the user with none at all
-        system = [a for a in adapters.ours() if a.instance_id == self.settings.system_adapter]
+        system = [a for a in adapters.ours() if a.instance_id == system_adapter()]
         if system and _ask("Give this PC's Bluetooth back to Windows now?\n\n"
                            "If you don't, Windows Bluetooth stays off until Bluetooth Multicodec runs again."):
             try:
                 adapters.give_back(system[0])
-                self.settings.system_adapter = None
-                self.settings.save()
+                set_system_adapter(None)
             except Exception as error:
                 _error(f"Couldn't restore {system[0].name}:\n{error}")
         self.icon.stop()
