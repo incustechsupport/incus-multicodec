@@ -58,6 +58,12 @@ their input to Windows. Phones, Phone Link, game controllers and other Bluetooth
 until the adapter is given back (tray → *Bluetooth dongle* → *Give back to Windows*; quitting the
 app offers this too). Bluetooth mice and keyboards paired in Windows need pairing again in the app.
 
+**Switching the PC's own Bluetooth usually needs one Windows restart**: Windows is using that
+adapter, so it can't swap the driver until it restarts (the adapter may vanish until then; the tray
+says "Restart Windows to finish"). The app is set to start at sign-in when you do this. A pending
+switch can be cancelled from the tray. Giving the adapter back doesn't need a restart: the app
+closes it first.
+
 Input from these mice and keyboards can't reach the sign-in screen, UAC prompts or windows running
 as administrator (a Windows limit on injected input), so keep a touchpad or wired mouse/keyboard
 handy. With a supported dongle plugged in, the built-in adapter is never offered.

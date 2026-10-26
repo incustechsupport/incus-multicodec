@@ -29,6 +29,9 @@ SPDRP_SERVICE = 0x04
 SPDRP_FRIENDLYNAME = 0x0C
 SPDRP_CAPABILITIES = 0x0F
 CM_DEVCAP_REMOVABLE = 0x04
+DN_NEED_RESTART = 0x00000100  # cfg.h (same bit as DN_LIAR)
+DN_HAS_PROBLEM = 0x00000400
+CM_PROB_NEED_RESTART = 14
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 
@@ -45,6 +48,9 @@ class Adapter:
     pid: int
     service: str  # BTHUSB = Windows owns it, WinUSB = available to Bluetooth Multicodec
     removable: bool
+    # A driver change is waiting for a Windows restart (the old driver couldn't be stopped, which is
+    # normal for the PC's own Bluetooth while Windows is using it)
+    restart_pending: bool = False
 
     @property
     def usb_id(self) -> str:
@@ -56,7 +62,7 @@ class Adapter:
 
     @property
     def ours(self) -> bool:
-        return self.service.upper() == "WINUSB"
+        return self.service.upper() == "WINUSB" and not self.restart_pending
 
     @property
     def transport(self) -> str:
@@ -120,6 +126,12 @@ def list_adapters() -> list[Adapter]:
             instance = ctypes.create_unicode_buffer(512)
             setupapi.SetupDiGetDeviceInstanceIdW(hdev, ctypes.byref(info), instance, 512, None)
             caps = _registry_property(setupapi, hdev, info, SPDRP_CAPABILITIES)
+            status, problem = wintypes.ULONG(), wintypes.ULONG()
+            node_ok = ctypes.windll.cfgmgr32.CM_Get_DevNode_Status(
+                ctypes.byref(status), ctypes.byref(problem), info.DevInst, 0) == 0
+            restart_pending = node_ok and bool(
+                status.value & DN_NEED_RESTART
+                or (status.value & DN_HAS_PROBLEM and problem.value == CM_PROB_NEED_RESTART))
             adapters.append(Adapter(
                 instance_id=instance.value,
                 name=_string(_registry_property(setupapi, hdev, info, SPDRP_FRIENDLYNAME))
@@ -128,6 +140,7 @@ def list_adapters() -> list[Adapter]:
                 pid=int(match.group(2), 16),
                 service=_string(_registry_property(setupapi, hdev, info, SPDRP_SERVICE)),
                 removable=bool(caps and int.from_bytes(caps[1][:4], "little") & CM_DEVCAP_REMOVABLE),
+                restart_pending=restart_pending,
             ))
     finally:
         setupapi.SetupDiDestroyDeviceInfoList(hdev)

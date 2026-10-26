@@ -243,6 +243,13 @@ class TrayApp:
         items = []
         for a in found:
             verdict, chip, why = adapters.chip_support(a)
+            if a.restart_pending:
+                items.append(Item(f"{a.name}: restart Windows to finish switching", Menu(
+                    Item("Windows couldn't release it while in use; it switches on the next restart", None,
+                         enabled=False),
+                    Item("Cancel the switch (give back to Windows)",
+                         _background((lambda ad: lambda: self._give_back(ad))(a))))))
+                continue
             if a.ours:
                 items.append(Item(f"{a.name}: used by Bluetooth Multicodec ({chip}, {verdict})", Menu(
                     Item(why, None, enabled=False),
@@ -275,57 +282,68 @@ class TrayApp:
         verdict, chip, why = adapters.chip_support(adapter)
         caveat = "" if verdict == adapters.SUPPORTED else f"Note: {chip}, {verdict}. It {why}.\n\n"
         system = adapters.is_system_adapter(adapter, found)
-        what = ("WARNING: " + adapters.SYSTEM_ADAPTER_WARNING if system
-                else "Windows will stop using this dongle (its driver is switched to WinUSB).")
+        if system:
+            what = ("WARNING: " + adapters.SYSTEM_ADAPTER_WARNING + "\n\n"
+                    "Windows is using this adapter right now, so it will most likely ask you to restart to "
+                    "finish the switch. Bluetooth Multicodec will be set to start when you sign in, so your "
+                    "Bluetooth mouse and keyboard work again after pairing them in the app.")
+        else:
+            what = "Windows will stop using this dongle (its driver is switched to WinUSB)."
         if not _ask(f"Use {adapter.name} ({adapter.usb_id}) for Bluetooth Multicodec?\n\n{caveat}{what}\n\n"
                     "You can give it back from this menu at any time. "
                     "Windows will ask for administrator permission."):
             return
 
         builtin = adapters.holding_builtin(found)
-
-        def work():
+        if builtin:
+            # Moving from the no-dongle fallback to a dongle: close the built-in one first, so handing it
+            # back to Windows below doesn't need a restart
+            self.engine.release_adapter()
+        try:
+            adapters.take_over(adapter)
+            set_system_adapter(adapter.instance_id if system else None)
+            if system and not autostart_enabled():
+                set_autostart(True)  # with Windows Bluetooth off, the app is the only way back to a mouse
+        except Exception as error:
+            _error(f"Couldn't set up {adapter.name}:\n{error}")
+            self.engine.resume_adapter()
+            return
+        for old in builtin:
             try:
-                adapters.take_over(adapter)
-                set_system_adapter(adapter.instance_id if system else None)
+                adapters.give_back(old)
             except Exception as error:
-                _error(f"Couldn't set up {adapter.name}:\n{error}")
-                return
-            # Moving from the no-dongle fallback to a dongle: Windows gets its own Bluetooth back
-            for old in builtin:
-                try:
-                    adapters.give_back(old)
-                except Exception as error:
-                    _error(f"{adapter.name} is set up, but giving {old.name} back to Windows failed:\n{error}\n\n"
-                           "Use Bluetooth dongle → Give back to Windows to retry.")
-        threading.Thread(target=work, daemon=True).start()
+                _error(f"{adapter.name} is set up, but giving {old.name} back to Windows failed:\n{error}\n\n"
+                       "Use Bluetooth dongle → Give back to Windows to retry.")
+        self.engine.resume_adapter()
+        if any(a.restart_pending for a in adapters.list_adapters() if a.instance_id == adapter.instance_id):
+            self.engine._changed(f"Restart Windows to finish switching {adapter.name} over")
 
     def _give_back(self, adapter: adapters.Adapter) -> None:
         if not _ask(f"Give {adapter.name} back to Windows? Bluetooth Multicodec will stop streaming."):
             return
+        self._hand_back(adapter)
 
-        def work():
-            try:
-                self.engine.disconnect()
-                adapters.give_back(adapter)
-            except Exception as error:
-                _error(f"Couldn't restore {adapter.name}:\n{error}")
-        threading.Thread(target=work, daemon=True).start()
+    def _hand_back(self, adapter: adapters.Adapter) -> None:
+        """Close the adapter, then return it to Windows' own driver (no restart needed once it's closed)."""
+        try:
+            self.engine.release_adapter()
+            adapters.give_back(adapter)
+            if adapter.instance_id == system_adapter():
+                set_system_adapter(None)
+        except Exception as error:
+            _error(f"Couldn't restore {adapter.name}:\n{error}")
+        self.engine.resume_adapter()
 
     def _quit(self) -> None:
-        try:
-            self.engine.shutdown()
-        except Exception:
-            logger.exception("shutdown")
         # Leaving the PC's own Bluetooth on WinUSB with the app closed leaves the user with none at all
         system = [a for a in adapters.ours() if a.instance_id == system_adapter()]
         if system and _ask("Give this PC's Bluetooth back to Windows now?\n\n"
                            "If you don't, Windows Bluetooth stays off until Bluetooth Multicodec runs again."):
-            try:
-                adapters.give_back(system[0])
-                set_system_adapter(None)
-            except Exception as error:
-                _error(f"Couldn't restore {system[0].name}:\n{error}")
+            self._hand_back(system[0])
+        try:
+            self.engine.shutdown()
+        except Exception:
+            logger.exception("shutdown")
         self.icon.stop()
 
 

@@ -22,9 +22,11 @@ from bumble.device import Device, DeviceConfiguration
 from bumble.pairing import PairingConfig, PairingDelegate
 from bumble.transport import open_transport
 
+import usb1
+
 from . import adapters, capture, selection
 from .hidhost import HidHost, advertised_name, is_hid_advertisement
-from .settings import KEYS_FILE, STATE_DIR, Settings
+from .settings import KEYS_FILE, STATE_DIR, Settings, system_adapter
 from .stream import LivePump
 
 logger = logging.getLogger(__name__)
@@ -84,6 +86,8 @@ class Engine:
         self._wake = None  # asyncio.Event, created on the loop
         self.hid = HidHost(self)
         self._pending_change = None  # asyncio.TimerHandle for _changed_soon
+        self._session: asyncio.Task | None = None  # the running adapter session
+        self._released = False  # adapter handed back; don't reopen it
 
     # ------------------------------------------------------------------ public (any thread)
     def start(self) -> None:
@@ -111,6 +115,14 @@ class Engine:
     def shutdown(self) -> None:
         if self.loop.is_running():
             asyncio.run_coroutine_threadsafe(self._shutdown(), self.loop).result(timeout=10)
+
+    def release_adapter(self) -> None:
+        """Close the adapter (blocking) so its driver can be swapped without a Windows restart."""
+        if self.loop.is_running():
+            asyncio.run_coroutine_threadsafe(self._release(), self.loop).result(timeout=20)
+
+    def resume_adapter(self) -> None:
+        self._call(self._resume())
 
     # ------------------------------------------------------------------ plumbing
     def _call(self, coroutine) -> None:
@@ -143,31 +155,71 @@ class Engine:
         os.environ.setdefault("BUMBLE_RTK_FIRMWARE_DIR", str(FIRMWARE_DIR / "realtek"))
         while True:
             spec = self.transport_spec or await self._wait_for_adapter()
+            if self._released:
+                continue
+            self._session = asyncio.ensure_future(self._run_adapter(spec))
             try:
-                await self._run_adapter(spec)
+                await self._session
             except asyncio.CancelledError:
-                raise
+                if not self._released:
+                    raise
+            except usb1.USBErrorAccess:
+                # Another driver still holds the adapter (a switch waiting for a restart, or Windows'
+                # own driver came back): say so once instead of logging a traceback every few seconds
+                self.status.adapter = None
+                self._set_problem("Bluetooth adapter is busy: restart Windows to finish switching it over")
             except Exception as error:
                 logger.exception("adapter session ended")
                 self.status.adapter = None
                 self._changed(f"Bluetooth dongle stopped: {error}")
+            self._session = None
             self.hid.detach()
             self.device = self.connection = self.stream = None
             await asyncio.sleep(ADAPTER_POLL_SECONDS)
 
+    def _set_problem(self, problem: str | None) -> None:
+        if self.status.adapter_problem != problem:
+            self.status.adapter_problem = problem
+            self._changed(problem)
+
     async def _wait_for_adapter(self) -> str:
         while True:
-            found = await asyncio.to_thread(adapters.ours)
-            # A dongle wins over the built-in adapter (mid-switch from the no-dongle fallback)
-            found.sort(key=lambda a: not a.removable)
-            if found:
-                self.status.adapter_problem = None
-                self.status.adapter = found[0].name
-                return found[0].transport
-            if self.status.adapter_problem is None:
-                self.status.adapter_problem = "No dongle set up for Bluetooth Multicodec"
-                self._changed()
+            if not self._released:
+                listed = await asyncio.to_thread(adapters.list_adapters)
+                found = [a for a in listed if a.ours]
+                # A dongle wins over the built-in adapter (mid-switch from the no-dongle fallback)
+                found.sort(key=lambda a: not a.removable)
+                if found:
+                    self.status.adapter_problem = None
+                    self.status.adapter = found[0].name
+                    return found[0].transport
+                pending = [a for a in listed if a.restart_pending]
+                marker = system_adapter()
+                if pending or (marker and not any(a.instance_id == marker for a in listed)):
+                    # Switched, but Windows' own driver couldn't let go of the adapter until a restart
+                    # (the PC's own Bluetooth drops off the bus in the meantime)
+                    self._set_problem("Restart Windows to finish switching the Bluetooth adapter over")
+                else:
+                    self._set_problem("No dongle set up for Bluetooth Multicodec")
             await asyncio.sleep(ADAPTER_POLL_SECONDS)
+
+    async def _release(self) -> None:
+        self._released = True
+        self._want_device = None
+        if self.connection is not None:
+            try:
+                await self.connection.disconnect()
+            except Exception:
+                pass
+        self._teardown_capture()
+        if self._session is not None:
+            self._session.cancel()
+            await asyncio.wait([self._session])  # leaving the transport's `async with` closes the USB handle
+        self._set_problem("Bluetooth adapter handed back to Windows")
+
+    async def _resume(self) -> None:
+        self._released = False
+        self._want_device = self.settings.last_device
 
     async def _run_adapter(self, spec: str) -> None:
         STATE_DIR.mkdir(parents=True, exist_ok=True)

@@ -58,6 +58,8 @@ def cmd_adapters(_args) -> None:
         problem = adapters.takeover_problem(a, found)
         verdict, chip, why = adapters.chip_support(a)
         status = "Bluetooth Multicodec" if a.ours else ("Windows" if a.windows_owned else a.service or "no driver")
+        if a.restart_pending:
+            status = "switching: restart Windows to finish"
         print(f"{a.usb_id}  {status:8}  {'removable' if a.removable else 'built-in ':9}  {a.name}")
         print(f"           {chip}: {verdict} ({why})")
         if not a.ours:
@@ -84,9 +86,12 @@ def cmd_setup_adapter(args) -> None:
 
 
 def cmd_release_adapter(_args) -> None:
-    for a in adapters.ours():
-        adapters.give_back(a)
-        print(f"{a.name} given back to Windows")
+    # Includes a switch still waiting for a restart, so uninstalling also undoes that
+    for a in adapters.list_adapters():
+        if a.ours or (a.restart_pending and a.service.upper() == "WINUSB"):
+            adapters.give_back(a)
+            print(f"{a.name} given back to Windows")
+    set_system_adapter(None)
 
 
 async def _with_device(args, work):
