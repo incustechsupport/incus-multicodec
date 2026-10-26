@@ -61,15 +61,28 @@ def cmd_adapters(_args) -> None:
         print(f"{a.usb_id}  {status:8}  {'removable' if a.removable else 'built-in ':9}  {a.name}")
         print(f"           {chip}: {verdict} ({why})")
         if not a.ours:
-            print(f"           {'can be set up for Bluetooth Multicodec' if not problem else 'not usable: ' + problem}")
+            if problem:
+                print(f"           not usable: {problem}")
+            elif adapters.is_system_adapter(a, found):
+                print("           can be used as a fallback, but Windows Bluetooth is off while it is (setup-adapter --yes)")
+            else:
+                print("           can be set up for Bluetooth Multicodec")
 
 
 def cmd_setup_adapter(args) -> None:
-    match = [a for a in adapters.list_adapters() if a.usb_id == args.usb_id.lower()]
+    found = adapters.list_adapters()
+    match = [a for a in found if a.usb_id == args.usb_id.lower()]
     if not match:
         raise SystemExit(f"no Bluetooth adapter {args.usb_id}")
-    adapters.take_over(match[0], force=args.force)
-    print(f"{match[0].name} is now set up for Bluetooth Multicodec")
+    adapter = match[0]
+    system = adapters.is_system_adapter(adapter, found)
+    if system and not args.yes and not args.force:
+        raise SystemExit(f"{adapters.SYSTEM_ADAPTER_WARNING}\n\nRe-run with --yes to go ahead.")
+    adapters.take_over(adapter, force=args.force)
+    settings = Settings.load()
+    settings.system_adapter = adapter.instance_id if system else None
+    settings.save()
+    print(f"{adapter.name} is now set up for Bluetooth Multicodec")
 
 
 def cmd_release_adapter(_args) -> None:
@@ -270,7 +283,8 @@ def main():
     sub.add_parser("adapters", help="list Bluetooth adapters")
     p = sub.add_parser("setup-adapter", help="switch a dongle to WinUSB for Bluetooth Multicodec")
     p.add_argument("usb_id", help="vid:pid, as shown by `adapters`")
-    p.add_argument("--force", action="store_true", help="even a built-in or Windows' only adapter")
+    p.add_argument("--yes", action="store_true", help="accept turning Windows Bluetooth off (PC's own adapter, no dongle)")
+    p.add_argument("--force", action="store_true", help="skip all safety checks")
     sub.add_parser("release-adapter", help="give Bluetooth Multicodec's dongle back to Windows")
     sub.add_parser("info", help="load firmware and show adapter info")
     sub.add_parser("selftest", help="check every codec encoder and the WinUSB installer")

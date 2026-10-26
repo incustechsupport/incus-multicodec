@@ -141,15 +141,28 @@ class TrayApp:
                      else (lambda a: lambda: self.engine.connect(a))(address)),
                 Item("Forget", (lambda a, n: lambda: _ask(f"Forget {n}?") and self.engine.forget(a))(address, name)),
             ), checked=(lambda c: lambda _: c)(connected)))
+        hid_connected = self.engine.hid.connected()
+        if self.settings.hid_devices:
+            if items:
+                items.append(Menu.SEPARATOR)
+            items.append(Item("Mice & keyboards", None, enabled=False))
+            for address, info in sorted(self.settings.hid_devices.items(), key=lambda kv: kv[1]["name"].lower()):
+                connected = address in hid_connected
+                items.append(Item(info["name"] if connected else f"{info['name']}  (asleep or off)", Menu(
+                    Item("Forget", (lambda a, n: lambda: _ask(f"Forget {n}?") and self.engine.forget(a))(
+                        address, info["name"])),
+                ), checked=(lambda c: lambda _: c)(connected)))
         if items:
             items.append(Menu.SEPARATOR)
         if s.scanning:
-            items.append(Item("Searching... (put headphones in pairing mode)", None, enabled=False))
+            items.append(Item("Searching... (put the device in pairing mode)", None, enabled=False))
         else:
             items.append(Item("Add a device...", lambda: self.engine.scan(12), enabled=self.engine.device is not None))
+        kinds = {"audio": "headphones/speaker", "hid": "mouse/keyboard", "hid-le": "mouse/keyboard"}
         for address, name in s.found.items():
-            if address not in self.settings.devices:
-                items.append(Item(f"Pair {name}", (lambda a, n: lambda: self.engine.pair(a, n))(address, name)))
+            if address not in self.settings.devices and address not in self.settings.hid_devices:
+                kind = kinds.get(s.found_kind.get(address, "audio"), "")
+                items.append(Item(f"Pair {name} ({kind})", (lambda a, n: lambda: self.engine.pair(a, n))(address, name)))
         return items
 
     def _codec_items(self):
@@ -212,10 +225,15 @@ class TrayApp:
                     items.append(Item(f"{a.name} ({owner}) – can't use: {problem.split(';')[0]}", None, enabled=False))
                 else:
                     mark = "" if verdict == adapters.SUPPORTED else f" – {verdict}"
-                    items.append(Item(f"Use {a.name} ({chip}{mark}) for Bluetooth Multicodec...",
-                                      (lambda ad: lambda: self._take_over(ad))(a)))
+                    if adapters.is_system_adapter(a, found):
+                        label = f"Use this PC's own Bluetooth ({a.name}){mark} – turns Windows Bluetooth off..."
+                    else:
+                        label = f"Use {a.name} ({chip}{mark}) for Bluetooth Multicodec..."
+                    items.append(Item(label, (lambda ad, fd: lambda: self._take_over(ad, fd))(a, found)))
         if not any(a.ours for a in found) and not any(not adapters.takeover_problem(a, found) for a in found):
             items.append(Item("Plug in a USB Bluetooth dongle to use with Bluetooth Multicodec", None, enabled=False))
+        elif not any(a.ours or not adapters.is_system_adapter(a, found) for a in found):
+            items.append(Item("Tip: a USB Bluetooth dongle lets Windows keep its own Bluetooth", None, enabled=False))
         return items
 
     # ------------------------------------------------------------------ actions
@@ -224,18 +242,22 @@ class TrayApp:
         self.settings.save()
         self.engine.restream()
 
-    def _take_over(self, adapter: adapters.Adapter) -> None:
+    def _take_over(self, adapter: adapters.Adapter, found: list[adapters.Adapter]) -> None:
         verdict, chip, why = adapters.chip_support(adapter)
         caveat = "" if verdict == adapters.SUPPORTED else f"Note: {chip}, {verdict}. It {why}.\n\n"
-        if not _ask(f"Use {adapter.name} ({adapter.usb_id}) for Bluetooth Multicodec?\n\n{caveat}"
-                    "Windows will stop using this dongle (its driver is switched to WinUSB). "
-                    "You can give it back from this menu at any time.\n\n"
+        system = adapters.is_system_adapter(adapter, found)
+        what = ("WARNING: " + adapters.SYSTEM_ADAPTER_WARNING if system
+                else "Windows will stop using this dongle (its driver is switched to WinUSB).")
+        if not _ask(f"Use {adapter.name} ({adapter.usb_id}) for Bluetooth Multicodec?\n\n{caveat}{what}\n\n"
+                    "You can give it back from this menu at any time. "
                     "Windows will ask for administrator permission."):
             return
 
         def work():
             try:
                 adapters.take_over(adapter)
+                self.settings.system_adapter = adapter.instance_id if system else None
+                self.settings.save()
             except Exception as error:
                 _error(f"Couldn't set up {adapter.name}:\n{error}")
         threading.Thread(target=work, daemon=True).start()
@@ -257,6 +279,16 @@ class TrayApp:
             self.engine.shutdown()
         except Exception:
             logger.exception("shutdown")
+        # Leaving the PC's own Bluetooth on WinUSB with the app closed leaves the user with none at all
+        system = [a for a in adapters.ours() if a.instance_id == self.settings.system_adapter]
+        if system and _ask("Give this PC's Bluetooth back to Windows now?\n\n"
+                           "If you don't, Windows Bluetooth stays off until Bluetooth Multicodec runs again."):
+            try:
+                adapters.give_back(system[0])
+                self.settings.system_adapter = None
+                self.settings.save()
+            except Exception as error:
+                _error(f"Couldn't restore {system[0].name}:\n{error}")
         self.icon.stop()
 
 

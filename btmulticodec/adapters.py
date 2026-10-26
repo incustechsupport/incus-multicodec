@@ -171,16 +171,18 @@ def ours() -> list[Adapter]:
     return [a for a in list_adapters() if a.ours]
 
 
-def takeover_problem(adapter: Adapter, adapters: list[Adapter] | None = None) -> str | None:
-    """Why switching this adapter to WinUSB would hurt the user, or None if it's safe."""
-    adapters = adapters if adapters is not None else list_adapters()
+SYSTEM_ADAPTER_WARNING = (
+    "This is the Bluetooth Windows itself uses. While Bluetooth Multicodec has it, Windows Bluetooth is off: "
+    "Bluetooth mice, keyboards, phones, Phone Link and other headphones disconnect, including at the "
+    "sign-in screen, until you give it back from the tray menu. Make sure you have a touchpad or wired "
+    "mouse/keyboard first. A separate USB Bluetooth dongle avoids all of this."
+)
+
+
+def _hard_problem(adapter: Adapter, adapters: list[Adapter]) -> str | None:
+    """Reasons this adapter can never be used, whatever else is plugged in."""
     if adapter.ours:
         return "it is already set up for Bluetooth Multicodec"
-    if not adapter.removable:
-        return ("it is built into this PC; Windows needs it for your mouse, phone and other devices. "
-                "Plug in a separate USB Bluetooth dongle for Bluetooth Multicodec")
-    if adapter.windows_owned and not any(a.windows_owned for a in adapters if a.instance_id != adapter.instance_id):
-        return "it is the only Bluetooth adapter Windows has; Windows would be left with no Bluetooth"
     twins = [a for a in adapters if a.usb_id == adapter.usb_id and a.instance_id != adapter.instance_id]
     if twins:
         # The WinUSB driver is installed per VID:PID, so it would capture the twin as well
@@ -189,6 +191,36 @@ def takeover_problem(adapter: Adapter, adapters: list[Adapter] | None = None) ->
     if verdict == UNSUPPORTED:
         return f"{chip} not supported: {why}"
     return None
+
+
+def is_system_adapter(adapter: Adapter, adapters: list[Adapter]) -> bool:
+    """Built into the PC, or the only Bluetooth adapter Windows has: taking it costs the user Windows Bluetooth."""
+    if not adapter.removable:
+        return True
+    return adapter.windows_owned and not any(
+        a.windows_owned for a in adapters if a.instance_id != adapter.instance_id)
+
+
+def takeover_problem(adapter: Adapter, adapters: list[Adapter] | None = None) -> str | None:
+    """Why this adapter can't be switched to WinUSB, or None if it can (see takeover_warning for caveats)."""
+    adapters = adapters if adapters is not None else list_adapters()
+    if problem := _hard_problem(adapter, adapters):
+        return problem
+    if is_system_adapter(adapter, adapters):
+        # The PC's own Bluetooth is only a fallback for when there's no dongle to use instead
+        if any(a.ours for a in adapters):
+            return "a dongle is already set up for Bluetooth Multicodec"
+        dongles = [a for a in adapters if a.instance_id != adapter.instance_id
+                   and not is_system_adapter(a, adapters) and _hard_problem(a, adapters) is None]
+        if dongles:
+            return f"use the {dongles[0].name} dongle instead, so Windows keeps its own Bluetooth"
+    return None
+
+
+def takeover_warning(adapter: Adapter, adapters: list[Adapter] | None = None) -> str | None:
+    """What the user gives up by switching this adapter, if anything."""
+    adapters = adapters if adapters is not None else list_adapters()
+    return SYSTEM_ADAPTER_WARNING if is_system_adapter(adapter, adapters) else None
 
 
 def _run_elevated(exe: pathlib.Path, args: str) -> int:

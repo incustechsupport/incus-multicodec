@@ -45,15 +45,30 @@ What matters is the chip inside, not the brand. Bluetooth Multicodec checks it b
 Dongles that appear as USB *sound cards* (Creative BT-W5, Avantree DG80) are not Bluetooth
 adapters; they do aptX themselves and don't need Bluetooth Multicodec.
 
-Bluetooth Multicodec refuses to take over a built-in adapter, Windows' only adapter, or an adapter whose
-USB ID matches another one plugged in (the WinUSB binding is per USB ID).
+Bluetooth Multicodec never takes an adapter whose USB ID matches another one plugged in (the
+WinUSB binding is per USB ID).
+
+### No dongle? Use the PC's own Bluetooth
+
+When no usable dongle is plugged in, the PC's built-in Bluetooth (or Windows' only adapter) can be
+used instead, after a warning: **while Bluetooth Multicodec has it, Windows Bluetooth is off.**
+To keep the essentials working, Bluetooth Multicodec then acts as the host for **mice and
+keyboards** itself (Bluetooth LE and Classic, including media keys and passkey pairing), feeding
+their input to Windows. Phones, Phone Link, game controllers and other Bluetooth devices don't work
+until the adapter is given back (tray → *Bluetooth dongle* → *Give back to Windows*; quitting the
+app offers this too). Bluetooth mice and keyboards paired in Windows need pairing again in the app.
+
+Input from these mice and keyboards can't reach the sign-in screen, UAC prompts or windows running
+as administrator (a Windows limit on injected input), so keep a touchpad or wired mouse/keyboard
+handy. With a supported dongle plugged in, the built-in adapter is never offered.
 
 ## Using it
 
 1. Plug in the dongle, start **Bluetooth Multicodec** (tray icon) → *Bluetooth dongle* → *Use … for Bluetooth Multicodec*
    (one UAC prompt).
-2. *Devices* → *Add a device…* with the headphones in pairing mode → *Pair …*.
-3. Play anything. The headphones reconnect automatically next time.
+2. *Devices* → *Add a device…* with the headphones (or mouse/keyboard) in pairing mode → *Pair …*.
+   Keyboards that need a passkey show it as a notification: type it on the keyboard, then Enter.
+3. Play anything. Headphones, mice and keyboards reconnect automatically next time.
 
 *Bluetooth dongle* → *Give back to Windows* undoes step 1 (so does uninstalling).
 
@@ -72,14 +87,14 @@ git clone --depth 1 https://github.com/pbatard/libwdi                         th
 msiexec /a wdfcoinstaller.msi /qn TARGETDIR=%CD%\third_party\wdk8
 native\build.cmd          :: ldac.dll, aptx.dll, sbc.dll
 native\build-wdi.cmd      :: wdi-simple.exe
-.venv\Scripts\python -m bumble.tools.intel_fw_download --output-dir firmware\intel
+.venv\Scripts\python packaging\fetch_firmware.py   :: Intel + Realtek firmware into firmware\
 .venv\Scripts\python -m btmulticodec selftest
 .venv\Scripts\pyinstaller packaging\multicodec.spec --noconfirm     :: dist\windows-bluetooth-multicodec\
 "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\multicodec.iss   :: dist\windows-bluetooth-multicodec-setup-*.exe
 ```
 
-Realtek firmware: Bumble's `rtk_fw_download` tool has a broken import in 0.0.236; run it with a
-`PYTHONPATH` shim providing `tools/rtk_util.py` = `from bumble.tools.rtk_util import *`.
+`fetch_firmware.py` works around Bumble 0.0.236's broken `rtk_fw_download` import and adds the
+Intel images linux-firmware only publishes as symlinks (e.g. `ibt-0040-4150` → `ibt-0040-0041`).
 
 From Git Bash, run the `.cmd` scripts as `cmd //c 'native\build.cmd'`.
 
@@ -93,8 +108,9 @@ Logs: `%LOCALAPPDATA%\windows-bluetooth-multicodec\multicodec.log`. Settings and
 
 ## Limits
 
-- Audio only (A2DP source). Calls/microphone (HFP) are not supported.
-- One audio device at a time.
+- Audio out (A2DP source), plus mice and keyboards when using the PC's own Bluetooth.
+  Calls/microphone (HFP), phones and game controllers are not supported.
+- One audio device at a time. Keyboard LEDs (Caps Lock light) aren't driven yet.
 - Lip-sync: LDAC/aptX add ~150–250 ms like on any platform; aptX LL is the low-latency option.
 - See THIRD_PARTY_NOTICES.md for licences and trademarks.
 

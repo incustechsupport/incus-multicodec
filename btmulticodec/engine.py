@@ -19,9 +19,11 @@ from bumble.a2dp import make_audio_source_service_sdp_records
 from bumble.avdtp import Listener, Protocol, find_avdtp_service_with_connection
 from bumble.core import AdvertisingData, PhysicalTransport
 from bumble.device import Device, DeviceConfiguration
+from bumble.pairing import PairingConfig, PairingDelegate
 from bumble.transport import open_transport
 
 from . import adapters, capture, selection
+from .hidhost import HidHost, advertised_name, is_hid_advertisement
 from .settings import KEYS_FILE, STATE_DIR, Settings
 from .stream import LivePump
 
@@ -51,6 +53,19 @@ class Status:
     message: str | None = None  # last notable event or error
     scanning: bool = False
     found: dict[str, str] = field(default_factory=dict)  # address -> name from the last scan
+    found_kind: dict[str, str] = field(default_factory=dict)  # address -> "audio" | "hid" | "hid-le"
+    found_class: dict[str, int] = field(default_factory=dict)  # address -> class of device (classic)
+
+
+class _Delegate(PairingDelegate):
+    """We have a "display": keyboards that need a passkey get it shown as a notification."""
+
+    def __init__(self, engine: Engine):
+        super().__init__(io_capability=PairingDelegate.DISPLAY_OUTPUT_ONLY)
+        self.engine = engine
+
+    async def display_number(self, number: int, digits: int) -> None:
+        self.engine._changed(f"Type {number:0{digits}d} on the keyboard, then press Enter")
 
 
 class Engine:
@@ -67,6 +82,7 @@ class Engine:
         self.capture = None
         self._want_device: str | None = settings.last_device
         self._wake = None  # asyncio.Event, created on the loop
+        self.hid = HidHost(self)
 
     # ------------------------------------------------------------------ public (any thread)
     def start(self) -> None:
@@ -126,6 +142,7 @@ class Engine:
                 logger.exception("adapter session ended")
                 self.status.adapter = None
                 self._changed(f"Bluetooth dongle stopped: {error}")
+            self.hid.detach()
             self.device = self.connection = self.stream = None
             await asyncio.sleep(ADAPTER_POLL_SECONDS)
 
@@ -148,10 +165,12 @@ class Engine:
                 "name": os.environ.get("COMPUTERNAME", "Windows PC"),
                 "class_of_device": CLASS_OF_DEVICE,
                 "classic_enabled": True,
-                "le_enabled": False,
+                "le_enabled": True,  # Bluetooth LE mice and keyboards
                 "keystore": f"JsonKeyStore:{KEYS_FILE}",
             })
             device = Device.from_config_with_hci(config, transport.source, transport.sink)
+            device.pairing_config_factory = lambda connection: PairingConfig(
+                sc=True, mitm=True, bonding=True, delegate=_Delegate(self))
             device.sdp_service_records = {0x00010001: make_audio_source_service_sdp_records(0x00010001)}
             listener = Listener.for_device(device, version=(1, 3))
             listener.on("connection", self._on_incoming_avdtp)
@@ -159,6 +178,7 @@ class Engine:
             await device.power_on()
             await device.set_connectable(True)
             self.device = device
+            self.hid.attach(device)
             self.status.adapter = self.status.adapter or spec
             self._changed(f"Bluetooth dongle ready ({device.public_address})")
 
@@ -298,30 +318,61 @@ class Engine:
     async def _scan(self, seconds: int) -> None:
         if self.device is None or self.status.scanning:
             return
-        self.status.scanning, self.status.found = True, {}
-        self._changed("Searching for headphones and speakers... (put them in pairing mode)")
+        self.status.scanning, self.status.found, self.status.found_kind = True, {}, {}
+        self._changed("Searching for headphones, speakers, mice and keyboards... (put them in pairing mode)")
 
-        def on_result(address, class_of_device, data, rssi):
-            major = (class_of_device >> 8) & 0x1F
-            if major != 0x04:  # Audio/Video only
-                return
-            name = data.get(AdvertisingData.COMPLETE_LOCAL_NAME) or data.get(AdvertisingData.SHORTENED_LOCAL_NAME)
-            key = str(address).split("/")[0]
+        def add(key, name, kind):
             if name or key not in self.status.found:
                 self.status.found[key] = name or key
+                self.status.found_kind[key] = kind
                 self._changed()
 
-        self.device.on("inquiry_result", on_result)
+        def on_inquiry(address, class_of_device, data, rssi):
+            major = (class_of_device >> 8) & 0x1F
+            kind = {0x04: "audio", 0x05: "hid"}.get(major)  # Audio/Video, Peripheral
+            if kind:
+                key = str(address).split("/")[0]
+                self.status.found_class[key] = class_of_device
+                add(key, advertised_name(data), kind)
+
+        def on_advertisement(advertisement):
+            if is_hid_advertisement(advertisement.data):
+                add(str(advertisement.address), advertised_name(advertisement.data), "hid-le")
+
+        self.hid.paused = True
+        self.device.on("inquiry_result", on_inquiry)
+        self.device.on("advertisement", on_advertisement)
         try:
+            if self.device.scanning:
+                await self.device.stop_scanning()
+            await self.device.start_scanning(active=True)
             await self.device.start_discovery()
             await asyncio.sleep(seconds)
             await self.device.stop_discovery()
+            await self.device.stop_scanning()
         finally:
-            self.device.remove_listener("inquiry_result", on_result)
+            self.device.remove_listener("inquiry_result", on_inquiry)
+            self.device.remove_listener("advertisement", on_advertisement)
+            self.hid.paused = False
             self.status.scanning = False
-            self._changed(f"Found {len(self.status.found)} audio device(s)")
+            self._changed(f"Found {len(self.status.found)} device(s)")
 
     async def _pair(self, address: str, name: str | None) -> None:
+        kind = self.status.found_kind.get(address, "audio")
+        name = name or self.status.found.get(address, address)
+        if kind != "audio":
+            self._changed(f"Pairing with {name}...")
+            try:
+                if kind == "hid-le":
+                    await self.hid.pair_le(address, name)
+                else:
+                    await self.hid.pair_classic(address, name, self.status.found_class.get(address, 0))
+            except Exception as error:
+                logger.exception("HID pairing failed")
+                self.settings.hid_devices.pop(address, None)
+                self.settings.save()
+                self._changed(f"Couldn't pair {name}: {error}")
+            return
         if self.connection is not None:
             await self._disconnect_request()
         try:
@@ -334,6 +385,10 @@ class Engine:
         await self._connect_request(address)
 
     async def _forget(self, address: str) -> None:
+        if self.hid.is_hid(address):
+            await self.hid.forget(address)
+            self._changed("Device removed")
+            return
         if self.status.device == address:
             await self._disconnect_request()
         try:

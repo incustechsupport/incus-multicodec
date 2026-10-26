@@ -22,6 +22,9 @@ class Settings:
     mute_speakers: bool = True
     last_device: str | None = None
     devices: dict[str, str] = field(default_factory=dict)  # address -> name, for paired devices
+    system_adapter: str | None = None  # instance ID, when we took the PC's own Bluetooth (no dongle)
+    # address -> {"name", "le": bool, "descriptor": hex (classic), "keyboard": bool (classic)}
+    hid_devices: dict[str, dict] = field(default_factory=dict)
 
     _lock = threading.Lock()
 
