@@ -7,7 +7,7 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 ROOT = pathlib.Path(SPECPATH).parent
 
 datas = [
-    (str(ROOT / "btmulticodec" / "bin"), "btmulticodec/bin"),  # ldac.dll, aptx.dll, sbc.dll, wdi-simple.exe
+    (str(ROOT / "btmulticodec" / "bin"), "btmulticodec/bin"),  # ldac.dll, aptx.dll, aptxhd.dll, sbc.dll, aacmf.dll, procloop.dll, wdi-simple.exe
     (str(ROOT / "firmware"), "firmware"),
     (str(ROOT / "licenses"), "licenses"),
     (str(ROOT / "THIRD_PARTY_NOTICES.md"), "."),

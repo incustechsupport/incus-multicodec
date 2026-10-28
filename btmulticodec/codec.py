@@ -1,4 +1,4 @@
-"""A2DP codec information elements for the vendor codecs Incus Multicodec speaks: LDAC, aptX, aptX HD, aptX LL.
+"""A2DP codec information elements for the vendor codecs Incus Multicodec speaks: LDAC, aptX, aptX HD.
 
 Byte layouts follow the codec capability structs in PipeWire's spa/plugins/bluez5/a2dp-codec-caps.h.
 """
@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import dataclasses
 import enum
-import struct
 from typing import ClassVar
 
 from bumble import a2dp
@@ -118,50 +117,11 @@ class AptxHdMediaCodecInformation(AptxMediaCodecInformation):
         return bytes(4)
 
 
-@dataclasses.dataclass
-class AptxLlMediaCodecInformation(AptxMediaCodecInformation):
-    """aptX Low Latency: aptX byte, a flags byte, and (when has_new_caps) buffer-level tuning."""
-
-    bidirectional: bool = False
-    new_caps: bytes | None = None  # the 9 extended bytes, when the sink advertises them
-
-    NAME: ClassVar[str] = "aptX LL"
-    VENDOR_ID: ClassVar[int] = 0x0000000A  # CSR
-    CODEC_ID: ClassVar[int] = 0x0002
-
-    # PipeWire's defaults for the extended configuration
-    TARGET_CODEC_LEVEL: ClassVar[int] = 180
-    INITIAL_CODEC_LEVEL: ClassVar[int] = 360
-    SRA_MAX_RATE: ClassVar[int] = 50
-    SRA_AVG_TIME: ClassVar[int] = 1
-    GOOD_WORKING_LEVEL: ClassVar[int] = 180
-
-    def _extra_bytes(self) -> bytes:
-        flags = (1 if self.bidirectional else 0) | (0x02 if self.new_caps is not None else 0)
-        return bytes([flags]) + (self.new_caps or b"")
-
-    @classmethod
-    def from_bytes(cls, data: bytes):
-        flags = data[1] if len(data) > 1 else 0
-        new_caps = data[2:11] if flags & 0x02 and len(data) >= 11 else None
-        return cls(data[0] >> 4, data[0] & 0x0F, bool(flags & 0x01), new_caps)
-
-    def configuration(self, hz: int):
-        bit = next(b for b, rate in self.HZ.items() if rate == hz)
-        new_caps = None
-        if self.new_caps is not None:
-            new_caps = struct.pack("<BHHBBH", 0, self.TARGET_CODEC_LEVEL, self.INITIAL_CODEC_LEVEL,
-                                   self.SRA_MAX_RATE, self.SRA_AVG_TIME, self.GOOD_WORKING_LEVEL)
-        # Source-only: never ask for the voice back-channel
-        return type(self)(bit, self.STEREO, False, new_caps)
-
-
 def _rates(rates: list[int]) -> str:
     return "/".join(f"{hz / 1000:g}k" for hz in rates)
 
 
-ALL = [LdacMediaCodecInformation, AptxHdMediaCodecInformation, AptxMediaCodecInformation,
-       AptxLlMediaCodecInformation]
+ALL = [LdacMediaCodecInformation, AptxHdMediaCodecInformation, AptxMediaCodecInformation]
 
 # Let Bumble decode these capabilities when it discovers remote endpoints
 for _cls in ALL:

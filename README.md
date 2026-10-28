@@ -3,7 +3,7 @@
 **Download:** [latest release](https://github.com/incustechsupport/incus-multicodec/releases/latest) ·
 [website](https://software.incustech.app/multicodec/)
 
-High-quality Bluetooth audio for Windows 10/11: **LDAC, aptX HD, aptX, AAC, aptX Low Latency and SBC**,
+High-quality Bluetooth audio for Windows 10/11: **LDAC, aptX HD, aptX, AAC and SBC**,
 streamed through a cheap dedicated USB Bluetooth dongle. Windows keeps its own Bluetooth adapter
 for mice, keyboards, phones and Phone Link; Incus Multicodec never touches it.
 
@@ -23,13 +23,12 @@ Windows apps ──► default output ──(WASAPI loopback)──► Incus Mul
 | Codec | Encoder | Rates | Bitrate @48k | Notes |
 |---|---|---|---|---|
 | LDAC | Sony `libldac` (Apache-2.0) | 44.1–96 kHz | 990/660/330 kbps | best quality by default: 990 kbps whenever the link holds it, 24-bit input |
-| aptX HD | `libfreeaptx` (LGPL-2.1) | 44.1/48 kHz | 576 kbps | 24-bit, RTP framed |
-| aptX | `libfreeaptx` | 44.1/48 kHz | 384 kbps | raw codewords, no RTP |
+| aptX HD | Qualcomm's encoder from AOSP (Apache-2.0) | 44.1/48 kHz | 576 kbps | 24-bit, RTP framed |
+| aptX | Qualcomm's encoder from AOSP (Apache-2.0) | 44.1/48 kHz | 384 kbps | raw codewords, no RTP |
 | AAC | Windows' Media Foundation encoder | 44.1/48 kHz | up to 192 kbps CBR | LATM framed; not on Windows "N" without the Media Feature Pack |
-| aptX LL | `libfreeaptx` | 44.1/48 kHz | 384 kbps | aptX bitstream in ~4 ms packets |
 | SBC | BlueZ `libsbc` (LGPL-2.1) | 44.1/48 kHz | ~328 kbps | bitpool 53, for everything else |
 
-"Best quality available" (the default) picks LDAC > aptX HD > aptX > AAC > aptX LL > SBC from what the headphones offer.
+"Best quality available" (the default) picks LDAC > aptX HD > aptX > AAC > SBC from what the headphones offer.
 AAC uses the encoder built into Windows, which Microsoft has licensed, so Incus Multicodec ships no AAC code.
 
 ## Dongles
@@ -88,13 +87,15 @@ Requires Visual Studio 2022+ with C++ tools, Python 3.13, Git.
 ```
 python -m venv .venv && .venv\Scripts\pip install -r requirements.txt
 git clone --depth 1 https://android.googlesource.com/platform/external/libldac third_party\libldac
-git clone --depth 1 https://github.com/iamthehorker/libfreeaptx                third_party\libfreeaptx
+:: Qualcomm's aptX and aptX HD encoders: system\embdrv\encoder_for_aptx and encoder_for_aptxhd of
+::   https://android.googlesource.com/platform/packages/modules/Bluetooth, copied into third_party\aosp-aptx
+::   (the commit used is in third_party\aosp-aptx\SOURCE.txt)
 git clone --depth 1 https://git.kernel.org/pub/scm/bluetooth/sbc.git          third_party\sbc
 git clone --depth 1 https://github.com/pbatard/libwdi                         third_party\libwdi
 :: WDK 8.0 redistributable (WinUSB co-installers needed by libwdi's INF template):
 ::   download https://go.microsoft.com/fwlink/p/?LinkID=253170 (wdfcoinstaller.msi), then
 msiexec /a wdfcoinstaller.msi /qn TARGETDIR=%CD%\third_party\wdk8
-native\build.cmd          :: ldac.dll, aptx.dll, sbc.dll
+native\build.cmd          :: ldac.dll, aptx.dll, aptxhd.dll, sbc.dll, aacmf.dll, procloop.dll
 native\build-wdi.cmd      :: wdi-simple.exe
 .venv\Scripts\python packaging\fetch_firmware.py   :: Intel + Realtek firmware into firmware\
 .venv\Scripts\python -m btmulticodec selftest
@@ -126,7 +127,8 @@ Logs: `%LOCALAPPDATA%\windows-bluetooth-multicodec\multicodec.log`. Settings and
 - Audio out (A2DP source), plus mice and keyboards when using the PC's own Bluetooth.
   Calls/microphone (HFP), phones and game controllers are not supported.
 - One audio device at a time. Keyboard LEDs (Caps Lock light) aren't driven yet.
-- Lip-sync: LDAC/aptX add ~150–250 ms like on any platform; aptX LL is the low-latency option.
+- Lip-sync: LDAC/aptX add ~150–250 ms like on any platform. aptX Low Latency isn't offered (Qualcomm's
+  open-source release covers aptX and aptX HD only); aptX LL headphones get plain aptX.
 - See THIRD_PARTY_NOTICES.md for licences and trademarks.
 
 ## Licence

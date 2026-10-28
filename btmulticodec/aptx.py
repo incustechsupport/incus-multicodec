@@ -1,39 +1,43 @@
-"""ctypes binding for libfreeaptx (bin/aptx.dll): aptX and aptX HD encoding."""
+"""ctypes binding for the aptX (bin/aptx.dll) and aptX HD (bin/aptxhd.dll) encoders.
+
+Both DLLs are Qualcomm's encoders from the Android Open Source Project (Apache-2.0) behind the small
+C API in native/aptx_aosp.c. Their output is byte-for-byte what libfreeaptx, used up to 0.1.5, produced.
+"""
 
 import ctypes
 import pathlib
-from ctypes import POINTER, byref, c_int, c_size_t, c_void_p
+from ctypes import POINTER, byref, c_size_t, c_void_p
 
-DLL_PATH = pathlib.Path(__file__).parent / "bin" / "aptx.dll"
+BIN = pathlib.Path(__file__).parent / "bin"
 
 # One aptX "sample group": 4 stereo frames of packed 24-bit PCM in, 4 (aptX) or 6 (HD) bytes out
 GROUP_FRAMES = 4
 GROUP_PCM_BYTES = GROUP_FRAMES * 2 * 3
 
-_dll = None
+_dlls: dict[bool, ctypes.CDLL] = {}
 
 
-def _lib():
-    global _dll
-    if _dll is None:
-        if not DLL_PATH.is_file():
-            raise RuntimeError(f"{DLL_PATH} is missing; run native\\build.cmd first")
-        dll = ctypes.CDLL(str(DLL_PATH))
-        dll.aptx_init.argtypes = [c_int]
+def _lib(hd: bool) -> ctypes.CDLL:
+    if hd not in _dlls:
+        path = BIN / ("aptxhd.dll" if hd else "aptx.dll")
+        if not path.is_file():
+            raise RuntimeError(f"{path} is missing; run native\\build.cmd first")
+        dll = ctypes.CDLL(str(path))
+        dll.aptx_init.argtypes = []
         dll.aptx_init.restype = c_void_p
         dll.aptx_reset.argtypes = [c_void_p]
         dll.aptx_finish.argtypes = [c_void_p]
         dll.aptx_encode.argtypes = [c_void_p, c_void_p, c_size_t, c_void_p, c_size_t, POINTER(c_size_t)]
         dll.aptx_encode.restype = c_size_t
-        _dll = dll
-    return _dll
+        _dlls[hd] = dll
+    return _dlls[hd]
 
 
 class Encoder:
     def __init__(self, hd: bool):
-        self.lib = _lib()
+        self.lib = _lib(hd)
         self.hd = hd
-        self.handle = self.lib.aptx_init(1 if hd else 0)
+        self.handle = self.lib.aptx_init()
         if not self.handle:
             raise RuntimeError("aptx_init failed")
         # Encoded bytes per stereo PCM frame

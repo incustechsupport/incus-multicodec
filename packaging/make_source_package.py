@@ -24,7 +24,6 @@ from btmulticodec import __version__  # noqa: E402
 CACHE = ROOT / "third_party" / "downloads"
 # Built into the shipped binaries from these checkouts
 CHECKOUTS = {
-    "libfreeaptx": "aptx.dll (LGPL 2.1 or later)",
     "sbc": "sbc.dll (LGPL 2.1 or later)",
     "libwdi": "wdi-simple.exe (LGPL 3.0); built with native/libwdi_config.h as msvc/config.h",
     "libldac": "ldac.dll (Apache 2.0; included for completeness)",
@@ -35,7 +34,9 @@ DOWNLOADS = {
     "pystray-0.19.5.tar.gz": "https://github.com/moses-palmer/pystray/archive/refs/tags/v0.19.5.tar.gz",
     "libusb1-3.4.0.tar.gz": "https://files.pythonhosted.org/packages/source/l/libusb1/libusb1-3.4.0.tar.gz",
 }
-BUILD_FILES = ["native/build.cmd", "native/build-wdi.cmd", "native/aptx.def", "native/sbc.def",
+# Copied (not cloned) sources, Apache 2.0, included for completeness; SOURCE.txt names the commit
+COPIES = {"aosp-aptx": "aptx.dll and aptxhd.dll (Qualcomm's aptX / aptX HD encoders from AOSP, Apache 2.0)"}
+BUILD_FILES = ["native/build.cmd", "native/build-wdi.cmd", "native/aptx_aosp.c", "native/sbc.def",
                "native/libwdi_config.h", "native/compat/msvc_compat.h", "native/compat/sbc_compat.h",
                "native/compat/unistd.h", "requirements.txt", "THIRD_PARTY_NOTICES.md"]
 
@@ -66,6 +67,13 @@ def main() -> None:
                                      capture_output=True, check=True).stdout
             z.writestr(f"{name}-{commit[:7]}.zip", archive)
             readme.append(f"- {name}-{commit[:7]}.zip: {url} at {commit}, for {what}")
+        for name, what in COPIES.items():
+            folder = ROOT / "third_party" / name
+            for path in sorted(folder.rglob("*")):
+                if path.is_file():
+                    z.write(path, f"{name}/{path.relative_to(folder).as_posix()}")
+            source = (folder / "SOURCE.txt").read_text(encoding="utf-8").strip()
+            readme.append(f"- {name}/: {source}, for {what}")
         for name, url in DOWNLOADS.items():
             z.writestr(name, fetch(name, url))
             readme.append(f"- {name}: {url}")

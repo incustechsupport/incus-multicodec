@@ -30,13 +30,25 @@ if errorlevel 1 (type "%LOG%" & echo BUILD FAILED, see %LOG% & exit /b 1)
 del "%OUT%\ldac.exp" "%OUT%\ldac.lib" 2>nul
 echo built %OUT%\ldac.dll
 
-rem aptX / aptX HD encoder (libfreeaptx, LGPL-2.1), kept as its own DLL
-set APTX=%ROOT%\third_party\libfreeaptx
-cl /nologo /O2 /LD /W3 /MT /I "%APTX%" "%APTX%\freeaptx.c" /Fo"%OBJ%\\" /Fe"%OUT%\aptx.dll" ^
-  /link /DEF:"%~dp0aptx.def" > "%LOG%" 2>&1
+rem aptX and aptX HD: Qualcomm's encoders from AOSP (Apache-2.0), one DLL each because they share
+rem internal symbol names. native\aptx_aosp.c gives both the same small C API.
+set AOSPX=%ROOT%\third_party\aosp-aptx
+if not exist "%OBJ%\aptx" mkdir "%OBJ%\aptx"
+cl /nologo /O2 /LD /W3 /MT /wd4244 /I "%AOSPX%\encoder_for_aptx\include" /I "%AOSPX%\encoder_for_aptx\src" ^
+  "%~dp0aptx_aosp.c" "%AOSPX%\encoder_for_aptx\src\aptXbtenc.c" "%AOSPX%\encoder_for_aptx\src\ProcessSubband.c" ^
+  "%AOSPX%\encoder_for_aptx\src\QmfConv.c" "%AOSPX%\encoder_for_aptx\src\QuantiseDifference.c" ^
+  /Fo"%OBJ%\aptx\\" /Fe"%OUT%\aptx.dll" > "%LOG%" 2>&1
 if errorlevel 1 (type "%LOG%" & echo BUILD FAILED, see %LOG% & exit /b 1)
 del "%OUT%\aptx.exp" "%OUT%\aptx.lib" 2>nul
 echo built %OUT%\aptx.dll
+if not exist "%OBJ%\aptxhd" mkdir "%OBJ%\aptxhd"
+cl /nologo /O2 /LD /W3 /MT /wd4244 /D APTX_HD /I "%AOSPX%\encoder_for_aptxhd\include" /I "%AOSPX%\encoder_for_aptxhd\src" ^
+  "%~dp0aptx_aosp.c" "%AOSPX%\encoder_for_aptxhd\src\aptXHDbtenc.c" "%AOSPX%\encoder_for_aptxhd\src\ProcessSubband.c" ^
+  "%AOSPX%\encoder_for_aptxhd\src\QmfConv.c" "%AOSPX%\encoder_for_aptxhd\src\QuantiseDifference.c" ^
+  /Fo"%OBJ%\aptxhd\\" /Fe"%OUT%\aptxhd.dll" > "%LOG%" 2>&1
+if errorlevel 1 (type "%LOG%" & echo BUILD FAILED, see %LOG% & exit /b 1)
+del "%OUT%\aptxhd.exp" "%OUT%\aptxhd.lib" 2>nul
+echo built %OUT%\aptxhd.dll
 
 rem SBC encoder (BlueZ libsbc, LGPL-2.1), for speakers without LDAC/aptX; portable C primitives only
 set SBC=%ROOT%\third_party\sbc

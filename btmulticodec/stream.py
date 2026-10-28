@@ -89,7 +89,7 @@ class LdacSession(Session):
 
 
 class AptxSession(Session):
-    """aptX family. Classic aptX and aptX LL send raw codewords; aptX HD wraps them in RTP."""
+    """aptX family. Classic aptX sends raw codewords; aptX HD wraps them in RTP."""
 
     # Multiple of aptx.GROUP_FRAMES. Packets are cut by size below, so this only sets how often the
     # encoder runs (375 times a second here; 32 frames meant 1500 trips through Python)
@@ -101,7 +101,7 @@ class AptxSession(Session):
         self.mode = name
         room = mtu - (RTP_HEADER if self.rtp else 0)
         bytes_per_group = 6 if hd else 4
-        # Fill packets up to the MTU, but no more than packet_ms of audio (aptX LL wants small ones)
+        # Fill packets up to the MTU, but no more than packet_ms of audio
         cap = int(sample_rate * packet_ms / 1000 * self.encoder.bytes_per_frame)
         self.packet_bytes = max(bytes_per_group, min(room, cap) // bytes_per_group * bytes_per_group)
         self.pending = bytearray()

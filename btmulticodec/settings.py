@@ -40,7 +40,7 @@ def set_system_adapter(instance_id: str | None) -> None:
 class Settings:
     # Highest quality by default: the best codec the device has, and for LDAC 990 kbps whenever the link
     # holds it (libldac's adaptive mode steps down only under real congestion and climbs back up)
-    codec: str = "auto"  # auto | ldac | aptx-hd | aptx | aac | aptx-ll | sbc
+    codec: str = "auto"  # auto | ldac | aptx-hd | aptx | aac | sbc
     ldac_quality: str = "auto"  # auto (best, adaptive) | hq | sq | mq (fixed)
     source: str = "system"  # "system" (loopback of the default output) or a recording device name
     mute_speakers: bool = True
@@ -64,6 +64,8 @@ class Settings:
             logger.warning(f"{SETTINGS_FILE} is not valid JSON; starting with default settings")
             return cls()
         known = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        if known.get("codec") == "aptx-ll":  # dropped in 0.1.6; aptX LL headphones also offer plain aptX
+            known["codec"] = "auto"
         return cls(**known)
 
     def save(self) -> None:

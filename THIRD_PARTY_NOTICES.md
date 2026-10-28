@@ -15,12 +15,12 @@ Codecs (separate DLLs in `_internal\btmulticodec\bin`)
 - **LDAC encoder** (`ldac.dll`): libldac by Sony Corporation, from the Android Open Source Project
   (https://android.googlesource.com/platform/external/libldac, commit eeee1a3), built without
   changes. Apache License 2.0: `licenses/libldac-Apache-2.0.txt`, `licenses/libldac-NOTICE`.
-- **aptX / aptX HD encoder** (`aptx.dll`): libfreeaptx (https://github.com/iamthehorker/libfreeaptx,
-  commit 476e2d5), a fork of Pali Rohár's libopenaptx, an independent open-source implementation of
-  the aptX and aptX HD formats that also exists in FFmpeg. Built without changes. No Qualcomm code
-  is included. GNU LGPL 2.1 or later: `licenses/libfreeaptx-LGPL-2.1.txt`.
-- **aptX Low Latency**: not a separate encoder. It is the same aptX encoding as above, sent with
-  the A2DP codec identifier aptX Low Latency headphones announce, in smaller packets.
+- **aptX and aptX HD encoders** (`aptx.dll`, `aptxhd.dll`): Qualcomm's encoders as published in the
+  Android Open Source Project (https://android.googlesource.com/platform/packages/modules/Bluetooth,
+  `system/embdrv/encoder_for_aptx` and `encoder_for_aptxhd`, commit 745ee92), built without changes
+  together with Incus Multicodec's own small wrapper (`native/aptx_aosp.c`). Apache License 2.0:
+  `licenses/aosp-bluetooth-NOTICE` (the AOSP Bluetooth module's licence and notice).
+- aptX Low Latency is not supported.
 - **SBC encoder** (`sbc.dll`): the BlueZ SBC library (https://git.kernel.org/pub/scm/bluetooth/sbc.git,
   release 2.2), built without changes. GNU LGPL 2.1 or later: `licenses/libsbc-LGPL-2.1.txt`.
 - **AAC**: `aacmf.dll` is Incus Multicodec's own code calling the AAC encoder that comes with

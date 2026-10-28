@@ -1,4 +1,4 @@
-"""Incus Multicodec: LDAC / aptX HD / aptX / AAC / aptX LL / SBC Bluetooth audio for Windows, on a dedicated USB dongle.
+"""Incus Multicodec: LDAC / aptX HD / aptX / AAC / SBC Bluetooth audio for Windows, on a dedicated USB dongle.
 
 Usage:  python -m btmulticodec                  tray app (default)
         python -m btmulticodec adapters         list Bluetooth adapters and which one Incus Multicodec may use
@@ -7,7 +7,7 @@ Usage:  python -m btmulticodec                  tray app (default)
         python -m btmulticodec info | scan | selftest
         python -m btmulticodec codecs <address>
         python -m btmulticodec pair <address>
-        python -m btmulticodec play <address> [--codec auto|ldac|aptx-hd|aptx|aac|aptx-ll|sbc]
+        python -m btmulticodec play <address> [--codec auto|ldac|aptx-hd|aptx|aac|sbc]
                                [--quality auto|hq|sq|mq] [--source system|"CABLE Output"]
 """
 
@@ -171,7 +171,6 @@ def cmd_selftest(_args) -> None:
         "LDAC 330": lambda: LdacSession(679, rate, ldac.EQMID_MQ),
         "aptX HD": lambda: AptxSession(679, rate, True, 20, "aptX HD"),
         "aptX": lambda: AptxSession(679, rate, False, 20, "aptX"),
-        "aptX LL": lambda: AptxSession(679, rate, False, 4, "aptX LL"),
         "AAC": lambda: AacSession(679, rate, 192000),
         "SBC": lambda: SbcSession(679, sbc_config),
     }

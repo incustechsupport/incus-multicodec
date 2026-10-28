@@ -33,7 +33,6 @@ CODECS = [
     Codec("aptx-hd", "aptX HD", codec.AptxHdMediaCodecInformation),
     Codec("aptx", "aptX", codec.AptxMediaCodecInformation),
     Codec("aac", "AAC", None),
-    Codec("aptx-ll", "aptX Low Latency", codec.AptxLlMediaCodecInformation),
     Codec("sbc", "SBC", None),
 ]
 BY_KEY = {c.key: c for c in CODECS}
@@ -140,9 +139,6 @@ def session_factory(key: str, configuration: MediaCodecCapabilities, rate: int, 
         return lambda mtu: AptxSession(mtu, rate, hd=True, packet_ms=20, name="aptX HD")
     if key == "aptx":
         return lambda mtu: AptxSession(mtu, rate, hd=False, packet_ms=20, name="aptX")
-    if key == "aptx-ll":
-        # Same bitstream as aptX, sent in small packets so the sink can run a short buffer
-        return lambda mtu: AptxSession(mtu, rate, hd=False, packet_ms=4, name="aptX LL")
     if key == "aac":
         return lambda mtu: AacSession(mtu, rate, configuration.media_codec_information.bitrate)
     config_bytes = bytes(configuration.media_codec_information)
