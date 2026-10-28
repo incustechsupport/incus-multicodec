@@ -1,16 +1,19 @@
-# Windows Bluetooth Multicodec
+# Incus Multicodec
+
+**Download:** [latest release](https://github.com/incustechsupport/incus-multicodec/releases/latest) ·
+[website](https://software.incustech.app/multicodec/)
 
 High-quality Bluetooth audio for Windows 10/11: **LDAC, aptX HD, aptX, AAC, aptX Low Latency and SBC**,
 streamed through a cheap dedicated USB Bluetooth dongle. Windows keeps its own Bluetooth adapter
-for mice, keyboards, phones and Phone Link; Bluetooth Multicodec never touches it.
+for mice, keyboards, phones and Phone Link; Incus Multicodec never touches it.
 
 ```
-Windows apps ──► default output ──(WASAPI loopback)──► Bluetooth Multicodec ──► encoder ──► USB dongle (WinUSB) ──► headphones
+Windows apps ──► default output ──(WASAPI loopback)──► Incus Multicodec ──► encoder ──► USB dongle (WinUSB) ──► headphones
                   (PC speakers muted while streaming)            LDAC/aptX/SBC      Bumble Bluetooth stack
 ```
 
 - No virtual sound card and no kernel driver: audio is captured with WASAPI loopback, which is
-  taken before Windows' mute/volume. Bluetooth Multicodec mutes the PC speakers while it streams and applies
+  taken before Windows' mute/volume. Incus Multicodec mutes the PC speakers while it streams and applies
   the Windows volume itself.
 - The dongle is switched to Microsoft's inbox WinUSB driver with libwdi (the engine behind
   Zadig). That works with Secure Boot on and needs no paid driver signing.
@@ -27,11 +30,11 @@ Windows apps ──► default output ──(WASAPI loopback)──► Bluetooth
 | SBC | BlueZ `libsbc` (LGPL-2.1) | 44.1/48 kHz | ~328 kbps | bitpool 53, for everything else |
 
 "Best quality available" (the default) picks LDAC > aptX HD > aptX > AAC > aptX LL > SBC from what the headphones offer.
-AAC uses the encoder built into Windows, which Microsoft has licensed, so Bluetooth Multicodec ships no AAC code.
+AAC uses the encoder built into Windows, which Microsoft has licensed, so Incus Multicodec ships no AAC code.
 
 ## Dongles
 
-What matters is the chip inside, not the brand. Bluetooth Multicodec checks it before switching a dongle over
+What matters is the chip inside, not the brand. Incus Multicodec checks it before switching a dongle over
 (`bt-multicodec-cli adapters`, or the tray's *Bluetooth dongle* menu):
 
 | Verdict | Chips |
@@ -43,16 +46,16 @@ What matters is the chip inside, not the brand. Bluetooth Multicodec checks it b
 
 "Supported" means Bumble's driver tables list that exact USB ID and the firmware is bundled.
 Dongles that appear as USB *sound cards* (Creative BT-W5, Avantree DG80) are not Bluetooth
-adapters; they do aptX themselves and don't need Bluetooth Multicodec.
+adapters; they do aptX themselves and don't need Incus Multicodec.
 
-Bluetooth Multicodec never takes an adapter whose USB ID matches another one plugged in (the
+Incus Multicodec never takes an adapter whose USB ID matches another one plugged in (the
 WinUSB binding is per USB ID).
 
 ### No dongle? Use the PC's own Bluetooth
 
 When no usable dongle is plugged in, the PC's built-in Bluetooth (or Windows' only adapter) can be
-used instead, after a warning: **while Bluetooth Multicodec has it, Windows Bluetooth is off.**
-To keep the essentials working, Bluetooth Multicodec then acts as the host for **mice and
+used instead, after a warning: **while Incus Multicodec has it, Windows Bluetooth is off.**
+To keep the essentials working, Incus Multicodec then acts as the host for **mice and
 keyboards** itself (Bluetooth LE and Classic, including media keys and passkey pairing), feeding
 their input to Windows. Phones, Phone Link, game controllers and other Bluetooth devices don't work
 until the adapter is given back (tray → *Bluetooth dongle* → *Give back to Windows*; quitting the
@@ -70,7 +73,7 @@ handy. With a supported dongle plugged in, the built-in adapter is never offered
 
 ## Using it
 
-1. Plug in the dongle, start **Bluetooth Multicodec** (tray icon) → *Bluetooth dongle* → *Use … for Bluetooth Multicodec*
+1. Plug in the dongle, start **Incus Multicodec** (tray icon) → *Bluetooth dongle* → *Use … for Incus Multicodec*
    (one UAC prompt).
 2. *Devices* → *Add a device…* with the headphones (or mouse/keyboard) in pairing mode → *Pair …*.
    Keyboards that need a passkey show it as a notification: type it on the keyboard, then Enter.
@@ -95,9 +98,15 @@ native\build.cmd          :: ldac.dll, aptx.dll, sbc.dll
 native\build-wdi.cmd      :: wdi-simple.exe
 .venv\Scripts\python packaging\fetch_firmware.py   :: Intel + Realtek firmware into firmware\
 .venv\Scripts\python -m btmulticodec selftest
-.venv\Scripts\pyinstaller packaging\multicodec.spec --noconfirm     :: dist\windows-bluetooth-multicodec\
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\multicodec.iss   :: dist\windows-bluetooth-multicodec-setup-*.exe
+.venv\Scripts\python packaging\collect_licenses.py :: licence texts of every bundled Python package into licenses\
+.venv\Scripts\pyinstaller packaging\multicodec.spec --noconfirm     :: dist\incus-multicodec\
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\multicodec.iss   :: dist\incus-multicodec-setup-*.exe
+.venv\Scripts\python packaging\make_source_package.py :: dist\incus-multicodec-*-third-party-sources.zip
 ```
+
+A release attaches both the installer and the sources zip to a GitHub release tagged `v<version>`,
+then updates `latest.json` (version, URL, SHA-256, size) on software.incustech.app, which the
+app's update check reads.
 
 `fetch_firmware.py` works around Bumble 0.0.236's broken `rtk_fw_download` import and adds the
 Intel images linux-firmware only publishes as symlinks (e.g. `ibt-0040-4150` → `ibt-0040-0041`).
@@ -123,4 +132,5 @@ Logs: `%LOCALAPPDATA%\windows-bluetooth-multicodec\multicodec.log`. Settings and
 ## Licence
 
 MIT (see LICENSE) for this project's own code. Bundled third-party components keep their own
-licences; see THIRD_PARTY_NOTICES.md.
+licences; see THIRD_PARTY_NOTICES.md. TERMS.txt is what the installer shows (licence, no-warranty
+terms, privacy summary). Privacy notice: https://software.incustech.app/multicodec/privacy/

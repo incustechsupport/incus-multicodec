@@ -1,5 +1,5 @@
 """The "Report a bug" window: sends a description, the user's email (optional), a system summary and
-(if allowed) the end of the app's log to software.incustech.app, where it's saved and emailed to us.
+(if allowed) the end of the app's log, with Bluetooth addresses masked, to software.incustech.app.
 
 Like the devices window, Tk runs on this window's own thread and nothing else touches it.
 """
@@ -10,10 +10,12 @@ import json
 import logging
 import platform
 import queue
+import re
 import threading
 import tkinter as tk
 import urllib.error
 import urllib.request
+import webbrowser
 from tkinter import ttk
 
 from . import __version__, adapters
@@ -21,9 +23,10 @@ from .settings import LOG_FILE
 
 logger = logging.getLogger(__name__)
 
-APP_NAME = "Windows Bluetooth Multicodec"
+APP_NAME = "Incus Multicodec"
 TITLE = f"Report a bug - {APP_NAME}"
 REPORT_URL = "https://software.incustech.app/api/bug-report"
+PRIVACY_URL = "https://software.incustech.app/multicodec/privacy/"
 LOG_TAIL_BYTES = 400_000  # the server accepts up to 1.2 MB; the end of the log is the part that matters
 
 
@@ -52,6 +55,15 @@ def system_summary(engine) -> str:
     return "\n".join(lines)
 
 
+# Bluetooth addresses identify a person's devices. The last two bytes are enough to tell devices apart
+# in a log, so the rest is masked before a log leaves the PC.
+ADDRESS = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){4}([0-9A-Fa-f]{2}[:-][0-9A-Fa-f]{2})\b")
+
+
+def mask_addresses(text: str) -> str:
+    return ADDRESS.sub(lambda m: "XX:XX:XX:XX:" + m.group(1).replace("-", ":"), text)
+
+
 def log_tail() -> str:
     try:
         with open(LOG_FILE, "rb") as f:
@@ -63,7 +75,7 @@ def log_tail() -> str:
         return ""
     if size > LOG_TAIL_BYTES:
         data = data[data.find(b"\n") + 1:]  # start on a whole line
-    return data.decode("utf-8", errors="replace")
+    return mask_addresses(data.decode("utf-8", errors="replace"))
 
 
 def send(description: str, email: str, system: str, log: str) -> str:
@@ -71,7 +83,7 @@ def send(description: str, email: str, system: str, log: str) -> str:
     body = json.dumps({"app": APP_NAME, "version": __version__, "source": "app", "description": description,
                        "email": email, "system": system, "log": log}).encode("utf-8")
     request = urllib.request.Request(REPORT_URL, data=body, method="POST", headers={
-        "Content-Type": "application/json", "User-Agent": f"windows-bluetooth-multicodec/{__version__}"})
+        "Content-Type": "application/json", "User-Agent": f"incus-multicodec/{__version__}"})
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             return json.loads(response.read() or b"{}").get("id", "")
@@ -180,11 +192,15 @@ class BugReportWindow:
 
         include_log = tk.BooleanVar(value=True)
         ttk.Checkbutton(root, variable=include_log,
-                        text="Include the app's log (it lists your Bluetooth devices' names and addresses)"
+                        text="Include the app's log (it lists your Bluetooth devices' names; their addresses are masked)"
                         ).pack(anchor="w", padx=12, pady=(10, 0))
         ttk.Label(root, text="Always included: app and Windows version, your Bluetooth adapters, the codec "
                              "in use and the app's settings.", wraplength=520, foreground="#555"
                   ).pack(anchor="w", padx=12, pady=(2, 0))
+        privacy = ttk.Label(root, text="How reports are stored and used: privacy notice", foreground="#0067c0",
+                            cursor="hand2")
+        privacy.pack(anchor="w", padx=12, pady=(2, 0))
+        privacy.bind("<Button-1>", lambda _: webbrowser.open(PRIVACY_URL))
 
         status = tk.StringVar()
         ttk.Label(root, textvariable=status, wraplength=520).pack(anchor="w", padx=12, pady=(8, 0))

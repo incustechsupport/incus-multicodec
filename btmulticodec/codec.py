@@ -1,4 +1,4 @@
-"""A2DP codec information elements for the vendor codecs Bluetooth Multicodec speaks: LDAC, aptX, aptX HD, aptX LL.
+"""A2DP codec information elements for the vendor codecs Incus Multicodec speaks: LDAC, aptX, aptX HD, aptX LL.
 
 Byte layouts follow the codec capability structs in PipeWire's spa/plugins/bluez5/a2dp-codec-caps.h.
 """

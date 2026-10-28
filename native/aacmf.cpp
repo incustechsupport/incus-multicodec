@@ -1,5 +1,5 @@
 // aacmf.dll: AAC-LC encoding through Windows' own Media Foundation AAC encoder (already
-// licensed by Microsoft, so Bluetooth Multicodec ships no AAC code). Plain C API for ctypes:
+// licensed by Microsoft, so Incus Multicodec ships no AAC code). Plain C API for ctypes:
 //
 //   void* aacmf_open(int sample_rate, int channels, int bytes_per_second, long* hr_out)
 //   int   aacmf_encode(void* h, const short* pcm, int frames,

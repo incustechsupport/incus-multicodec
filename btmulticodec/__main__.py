@@ -1,9 +1,9 @@
-"""Windows Bluetooth Multicodec: LDAC / aptX HD / aptX / AAC / aptX LL / SBC Bluetooth audio for Windows, on a dedicated USB dongle.
+"""Incus Multicodec: LDAC / aptX HD / aptX / AAC / aptX LL / SBC Bluetooth audio for Windows, on a dedicated USB dongle.
 
 Usage:  python -m btmulticodec                  tray app (default)
-        python -m btmulticodec adapters         list Bluetooth adapters and which one Bluetooth Multicodec may use
-        python -m btmulticodec setup-adapter <vid:pid>      switch a dongle to WinUSB for Bluetooth Multicodec
-        python -m btmulticodec release-adapter              give Bluetooth Multicodec's dongle back to Windows
+        python -m btmulticodec adapters         list Bluetooth adapters and which one Incus Multicodec may use
+        python -m btmulticodec setup-adapter <vid:pid>      switch a dongle to WinUSB for Incus Multicodec
+        python -m btmulticodec release-adapter              give Incus Multicodec's dongle back to Windows
         python -m btmulticodec info | scan | selftest
         python -m btmulticodec codecs <address>
         python -m btmulticodec pair <address>
@@ -49,7 +49,7 @@ def default_transport(explicit: str | None) -> str:
         return explicit
     found = adapters.ours()
     if not found:
-        raise SystemExit("no Bluetooth adapter is set up for Bluetooth Multicodec; see `python -m btmulticodec adapters`")
+        raise SystemExit("no Bluetooth adapter is set up for Incus Multicodec; see `python -m btmulticodec adapters`")
     return found[0].transport
 
 
@@ -61,7 +61,7 @@ def cmd_adapters(_args) -> None:
     for a in found:
         problem = adapters.takeover_problem(a, found)
         verdict, chip, why = adapters.chip_support(a)
-        status = "Bluetooth Multicodec" if a.ours else ("Windows" if a.windows_owned else a.service or "no driver")
+        status = "Incus Multicodec" if a.ours else ("Windows" if a.windows_owned else a.service or "no driver")
         if a.restart_pending:
             status = "switching: restart Windows to finish"
         print(f"{a.usb_id}  {status:8}  {'removable' if a.removable else 'built-in ':9}  {a.name}")
@@ -72,7 +72,7 @@ def cmd_adapters(_args) -> None:
             elif adapters.is_system_adapter(a, found):
                 print("           can be used as a fallback, but Windows Bluetooth is off while it is (setup-adapter --yes)")
             else:
-                print("           can be set up for Bluetooth Multicodec")
+                print("           can be set up for Incus Multicodec")
 
 
 def cmd_setup_adapter(args) -> None:
@@ -86,7 +86,7 @@ def cmd_setup_adapter(args) -> None:
         raise SystemExit(f"{adapters.SYSTEM_ADAPTER_WARNING}\n\nRe-run with --yes to go ahead.")
     adapters.take_over(adapter, force=args.force)
     set_system_adapter(adapter.instance_id if system else None)
-    print(f"{adapter.name} is now set up for Bluetooth Multicodec")
+    print(f"{adapter.name} is now set up for Incus Multicodec")
 
 
 def cmd_release_adapter(_args) -> None:
@@ -297,16 +297,16 @@ def cmd_play(args) -> None:
 
 def main():
     parser = argparse.ArgumentParser(prog="bt-multicodec", description=__doc__.splitlines()[0])
-    parser.add_argument("--transport", help="Bumble transport; default: the adapter set up for Bluetooth Multicodec")
+    parser.add_argument("--transport", help="Bumble transport; default: the adapter set up for Incus Multicodec")
     parser.add_argument("-v", "--verbose", action="store_true")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("tray", help="run the tray app (default)")
     sub.add_parser("adapters", help="list Bluetooth adapters")
-    p = sub.add_parser("setup-adapter", help="switch a dongle to WinUSB for Bluetooth Multicodec")
+    p = sub.add_parser("setup-adapter", help="switch a dongle to WinUSB for Incus Multicodec")
     p.add_argument("usb_id", help="vid:pid, as shown by `adapters`")
     p.add_argument("--yes", action="store_true", help="accept turning Windows Bluetooth off (PC's own adapter, no dongle)")
     p.add_argument("--force", action="store_true", help="skip all safety checks")
-    sub.add_parser("release-adapter", help="give Bluetooth Multicodec's dongle back to Windows")
+    sub.add_parser("release-adapter", help="give Incus Multicodec's dongle back to Windows")
     sub.add_parser("info", help="load firmware and show adapter info")
     sub.add_parser("selftest", help="check every codec encoder and the WinUSB installer")
     p = sub.add_parser("scan", help="find nearby Bluetooth devices")

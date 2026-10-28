@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import webbrowser
 import winreg
 
 import pystray
@@ -23,7 +24,9 @@ from .settings import LOG_FILE, STATE_DIR, Settings, set_system_adapter, system_
 
 logger = logging.getLogger(__name__)
 
-APP_NAME = "Windows Bluetooth Multicodec"
+APP_NAME = "Incus Multicodec"
+COPYRIGHT = "© 2026 Incus Technologies Limited"
+PRIVACY_URL = "https://software.incustech.app/multicodec/privacy/"
 RUN_VALUE = "windows-bluetooth-multicodec"  # autostart entry name
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 MB_YESNO, MB_ICONWARNING, MB_ICONERROR, MB_ICONINFORMATION, IDYES = 0x04, 0x30, 0x10, 0x40, 6
@@ -45,6 +48,12 @@ def _icon_image(state: str) -> Image.Image:
     d.rounded_rectangle((5, 30, 19, 56), radius=4, fill=colour)
     d.rounded_rectangle((45, 30, 59, 56), radius=4, fill=colour)
     return img
+
+
+def _bundled(name: str) -> str:
+    """A file shipped next to the app's own files (PyInstaller's _internal folder, or the repo in development)."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
 
 
 def _ask(text: str, title: str = APP_NAME) -> bool:
@@ -208,6 +217,12 @@ class TrayApp:
             )),
             Item("Open log", lambda: os.startfile(LOG_FILE) if LOG_FILE.exists() else os.startfile(STATE_DIR)),
             Item("Report a bug...", lambda: self.bug_report.show()),
+            Item("About", Menu(
+                Item(f"{APP_NAME} {__version__}", None, enabled=False),
+                Item(COPYRIGHT, None, enabled=False),
+                Item("Licence and third-party notices", lambda: os.startfile(_bundled("TERMS.txt"))),
+                Item("Privacy notice", lambda: webbrowser.open(PRIVACY_URL)),
+            )),
             Item("Quit", _background(self._quit)),
         )
 
@@ -303,7 +318,7 @@ class TrayApp:
                          _background((lambda ad: lambda: self._give_back(ad))(a))))))
                 continue
             if a.ours:
-                items.append(Item(f"{a.name}: used by Bluetooth Multicodec ({chip}, {verdict})", Menu(
+                items.append(Item(f"{a.name}: used by Incus Multicodec ({chip}, {verdict})", Menu(
                     Item(why, None, enabled=False),
                     Item("Give back to Windows", _background((lambda ad: lambda: self._give_back(ad))(a))))))
             else:
@@ -316,10 +331,10 @@ class TrayApp:
                     if adapters.is_system_adapter(a, found):
                         label = f"Use this PC's own Bluetooth ({a.name}){mark} – turns Windows Bluetooth off..."
                     else:
-                        label = f"Use {a.name} ({chip}{mark}) for Bluetooth Multicodec..."
+                        label = f"Use {a.name} ({chip}{mark}) for Incus Multicodec..."
                     items.append(Item(label, _background((lambda ad, fd: lambda: self._take_over(ad, fd))(a, found))))
         if not any(a.ours for a in found) and not any(not adapters.takeover_problem(a, found) for a in found):
-            items.append(Item("Plug in a USB Bluetooth dongle to use with Bluetooth Multicodec", None, enabled=False))
+            items.append(Item("Plug in a USB Bluetooth dongle to use with Incus Multicodec", None, enabled=False))
         elif not any(a.ours or not adapters.is_system_adapter(a, found) for a in found):
             items.append(Item("Tip: a USB Bluetooth dongle lets Windows keep its own Bluetooth", None, enabled=False))
         return items
@@ -337,11 +352,11 @@ class TrayApp:
         if system:
             what = ("WARNING: " + adapters.SYSTEM_ADAPTER_WARNING + "\n\n"
                     "Windows is using this adapter right now, so it will most likely ask you to restart to "
-                    "finish the switch. Bluetooth Multicodec will be set to start when you sign in, so your "
+                    "finish the switch. Incus Multicodec will be set to start when you sign in, so your "
                     "Bluetooth mouse and keyboard work again after pairing them in the app.")
         else:
             what = "Windows will stop using this dongle (its driver is switched to WinUSB)."
-        if not _ask(f"Use {adapter.name} ({adapter.usb_id}) for Bluetooth Multicodec?\n\n{caveat}{what}\n\n"
+        if not _ask(f"Use {adapter.name} ({adapter.usb_id}) for Incus Multicodec?\n\n{caveat}{what}\n\n"
                     "You can give it back from this menu at any time. "
                     "Windows will ask for administrator permission."):
             return
@@ -371,7 +386,7 @@ class TrayApp:
             self.engine._changed(f"Restart Windows to finish switching {adapter.name} over")
 
     def _give_back(self, adapter: adapters.Adapter) -> None:
-        if not _ask(f"Give {adapter.name} back to Windows? Bluetooth Multicodec will stop streaming."
+        if not _ask(f"Give {adapter.name} back to Windows? Incus Multicodec will stop streaming."
                     f"{self._pair_again_note()}"):
             return
         self._hand_back(adapter)
@@ -399,12 +414,12 @@ class TrayApp:
 
     def _toggle_admin(self) -> None:
         if not self.settings.run_as_admin:
-            if not _ask("Run Bluetooth Multicodec as administrator?\n\n"
+            if not _ask("Run Incus Multicodec as administrator?\n\n"
                         "Windows doesn't let normal apps control windows that run as administrator, so "
                         "your Bluetooth mouse and keyboard stop working in them. Running Bluetooth "
                         "Multicodec as administrator fixes that. (Nothing can reach Windows' own UAC "
                         "prompts, so use the touchpad or built-in keyboard for those.)\n\n"
-                        "Windows will ask for permission once, then Bluetooth Multicodec restarts. "
+                        "Windows will ask for permission once, then Incus Multicodec restarts. "
                         "Audio and mice pause for a few seconds."):
                 return
             try:
@@ -416,9 +431,9 @@ class TrayApp:
             self.settings.save()
             self._after_exit = elevation.start_task
         else:
-            if not _ask("Stop running Bluetooth Multicodec as administrator?\n\n"
+            if not _ask("Stop running Incus Multicodec as administrator?\n\n"
                         "Your Bluetooth mouse and keyboard won't work in windows that run as "
-                        "administrator. Bluetooth Multicodec restarts."):
+                        "administrator. Incus Multicodec restarts."):
                 return
             try:
                 elevation.remove_task()
@@ -477,7 +492,7 @@ class TrayApp:
         if release is None or self._updating:
             return
         if not _ask(f"Install version {release.version}? You have {__version__}.\n\n"
-                    "Bluetooth Multicodec closes while it installs and starts again by itself. "
+                    "Incus Multicodec closes while it installs and starts again by itself. "
                     "Audio and Bluetooth mice pause for a few seconds."):
             return
         self._updating = True
@@ -502,7 +517,7 @@ class TrayApp:
         # Leaving the PC's own Bluetooth on WinUSB with the app closed leaves the user with none at all
         system = [a for a in adapters.ours() if a.instance_id == system_adapter()] if ask else []
         if system and _ask("Give this PC's Bluetooth back to Windows now?\n\n"
-                           "If you don't, Windows Bluetooth stays off until Bluetooth Multicodec runs again."
+                           "If you don't, Windows Bluetooth stays off until Incus Multicodec runs again."
                            f"{self._pair_again_note()}"):
             self._hand_back(system[0])
         self.window.close()

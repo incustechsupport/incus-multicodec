@@ -1,4 +1,4 @@
-"""The background engine: owns the Bluetooth Multicodec dongle and keeps one audio sink connected and streaming.
+"""The background engine: owns the Incus Multicodec dongle and keeps one audio sink connected and streaming.
 
 Runs its own asyncio loop on a worker thread. The UI calls the public methods from any thread
 and gets told about changes through on_change(); read `status` for the current picture.
@@ -207,7 +207,7 @@ class Engine:
                     # (the PC's own Bluetooth drops off the bus in the meantime)
                     self._set_problem("Restart Windows to finish switching the Bluetooth adapter over")
                 else:
-                    self._set_problem("No dongle set up for Bluetooth Multicodec")
+                    self._set_problem("No dongle set up for Incus Multicodec")
             await asyncio.sleep(ADAPTER_POLL_SECONDS)
 
     async def _release(self) -> None:
@@ -376,7 +376,7 @@ class Engine:
         key = selection.choose(sinks, self.settings.codec)
         if key is None:
             wanted = "a codec" if self.settings.codec == "auto" else selection.BY_KEY[self.settings.codec].label
-            raise RuntimeError(f"it doesn't support {wanted} Bluetooth Multicodec can send")
+            raise RuntimeError(f"it doesn't support {wanted} Incus Multicodec can send")
 
         caps = selection.codec_info(sinks[key])
         self.capture = self._open_capture()

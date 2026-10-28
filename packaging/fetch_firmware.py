@@ -39,7 +39,7 @@ def main() -> None:
         env = dict(os.environ, PYTHONPATH=shim)
         run_bumble_tool("bumble.tools.rtk_fw_download", FIRMWARE / "realtek", env)
 
-    request = urllib.request.Request(WHENCE, headers={"User-Agent": "windows-bluetooth-multicodec"})
+    request = urllib.request.Request(WHENCE, headers={"User-Agent": "incus-multicodec"})
     whence = urllib.request.urlopen(request, timeout=60).read().decode()
     added = 0
     for name, target in re.findall(r"^Link: intel/(ibt-[\w-]+\.(?:sfi|ddc)) -> (ibt-[\w-]+\.(?:sfi|ddc))$", whence, re.M):

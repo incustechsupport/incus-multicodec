@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 
 logger = logging.getLogger(__name__)
 
+# Named after the product's first name ("Windows Bluetooth Multicodec"), kept so settings and pairings carry over
 STATE_DIR = pathlib.Path(os.environ.get("LOCALAPPDATA", pathlib.Path.home())) / "windows-bluetooth-multicodec"
 SETTINGS_FILE = STATE_DIR / "settings.json"
 KEYS_FILE = STATE_DIR / "keys.json"

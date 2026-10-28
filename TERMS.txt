@@ -1,0 +1,106 @@
+INCUS MULTICODEC - LICENCE AND TERMS OF USE
+Copyright (c) 2026 Incus Technologies Limited
+
+Please read these terms. By installing or using Incus Multicodec you agree to them.
+
+
+1. THE SHORT VERSION
+
+- Incus Multicodec is free. Its own code is open source under the MIT licence (section 6), at
+  https://github.com/incustechsupport/incus-multicodec
+- It is provided "as is", without warranty of any kind (section 3).
+- It switches the Bluetooth adapter you choose over to its own driver (WinUSB). While it has the
+  adapter, Windows can't use it: if that is your PC's built-in Bluetooth, Windows Bluetooth is off
+  until you give it back from the tray menu (Bluetooth dongle > Give back to Windows), or uninstall
+  the app, which gives it back.
+- Bluetooth mice and keyboards keep only their newest pairing. Pairing one with Incus Multicodec
+  replaces its pairing with Windows, so after giving the adapter back you need to pair it with
+  Windows again.
+- It sends nothing about you anywhere, except: an update check (twice a day, can be turned off), and
+  bug reports, only when you send one. See section 4.
+
+
+2. WHAT THE APP CHANGES ON YOUR PC
+
+- The Bluetooth adapter you pick is switched to Microsoft's WinUSB driver (Windows asks for
+  administrator permission). Uninstalling, or "Give back to Windows", switches it back.
+- Optionally: an entry that starts the app when you sign in, and a scheduled task that runs it as
+  administrator (only if you turn on "Mice and keyboards work in admin windows").
+- Settings, pairing keys and a log file are kept in %LOCALAPPDATA%\windows-bluetooth-multicodec.
+  Uninstalling leaves this folder; delete it to remove your pairings.
+
+
+3. NO WARRANTY, LIMITATION OF LIABILITY
+
+Incus Multicodec is provided "as is" and "as available", without warranty of any kind, express or
+implied, including but not limited to the warranties of merchantability, fitness for a particular
+purpose and non-infringement. You use it at your own risk. To the fullest extent the law allows,
+Incus Technologies Limited, its contributors and suppliers are not liable for any claim, damages or
+other liability, whether in contract, tort or otherwise, arising from, out of or in connection with
+the software or its use, including loss of Bluetooth or input devices, data or audio. Nothing in
+these terms limits liability that cannot be limited by law (for example for death or personal
+injury caused by negligence, or for fraud), or takes away rights you have as a consumer.
+
+
+4. PRIVACY
+
+The full privacy notice is at https://software.incustech.app/multicodec/privacy/. In short:
+
+- Update checks fetch https://software.incustech.app/multicodec/latest.json; updates are
+  downloaded from GitHub. Like any web request, these reveal your IP address to the server they go
+  to. Turn checks off under Updates > Check automatically.
+- Bug reports are sent only when you press "Send report". They contain what you type, your email
+  if you give it, a summary of your PC (app and Windows version, Bluetooth adapters, codec and
+  settings) and, if you leave the box ticked, the end of the app's log (device names, with
+  Bluetooth addresses masked). "See what's sent" shows the exact contents first.
+- Everything else (settings, pairing keys, the log) stays on your PC.
+
+
+5. COMPONENTS FROM OTHERS
+
+Incus Multicodec includes software from others under their own licences, listed in
+THIRD_PARTY_NOTICES.txt, with their full texts in the _internal\licenses folder. Where those
+licences give you more rights than these terms (for example the right to replace the LGPL-licensed
+libraries with your own versions, and to get their source code), those rights apply.
+
+It includes Microsoft WinUSB co-installers from the Windows Driver Kit, which Microsoft licenses
+for redistribution with programs like this one. For those Microsoft components you agree that:
+you may use them only as part of Incus Multicodec and only on Windows; you may not reverse engineer,
+decompile or disassemble them except where the law expressly allows it despite this limitation;
+you may not separate them from the program to distribute them; they are provided "as is"; and
+Microsoft and its suppliers are not liable for any damages arising from them, and give no support
+for them.
+
+Incus Multicodec is not made, certified or endorsed by Microsoft, Sony, Qualcomm, the Bluetooth
+SIG or anyone else whose products it works with. LDAC is a trademark of Sony Corporation. aptX is
+a trademark of Qualcomm Technologies International, Ltd. Bluetooth is a registered trademark of
+Bluetooth SIG, Inc. Windows is a trademark of the Microsoft group of companies. These names are
+used only to say what Incus Multicodec works with.
+
+
+6. THE MIT LICENCE (Incus Multicodec's own code)
+
+MIT License
+
+Copyright (c) 2026 Incus Technologies Limited
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+Questions: support@incustech.co.uk

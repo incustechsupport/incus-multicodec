@@ -1,4 +1,4 @@
-/* libwdi build configuration for Bluetooth Multicodec: WinUSB only, x64 only.
+/* libwdi build configuration for Incus Multicodec: WinUSB only, x64 only.
  * build-wdi.cmd copies this over third_party\libwdi\msvc\config.h before building. */
 #pragma once
 

@@ -15,7 +15,7 @@ from tkinter import messagebox, ttk
 
 logger = logging.getLogger(__name__)
 
-TITLE = "Bluetooth devices - Windows Bluetooth Multicodec"
+TITLE = "Bluetooth devices - Incus Multicodec"
 REFRESH_MS = 500
 SEARCH_SECONDS = 12
 KIND_LABELS = {"audio": "Speaker / headphones", "hid": "Mouse / keyboard", "hid-le": "Mouse / keyboard"}

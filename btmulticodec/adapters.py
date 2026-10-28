@@ -1,6 +1,6 @@
 """Find USB Bluetooth adapters and hand one to (or back from) WinUSB.
 
-Bluetooth Multicodec only ever drives a *dedicated* adapter: a dongle switched to WinUSB, so Windows keeps
+Incus Multicodec only ever drives a *dedicated* adapter: a dongle switched to WinUSB, so Windows keeps
 its own Bluetooth adapter for mice, phones and Phone Link. The switch uses libwdi's
 wdi-simple.exe (inbox WinUSB + a catalog signed by a throwaway local certificate), so it works
 with Secure Boot on and needs no paid signing.
@@ -46,7 +46,7 @@ class Adapter:
     name: str
     vid: int
     pid: int
-    service: str  # BTHUSB = Windows owns it, WinUSB = available to Bluetooth Multicodec
+    service: str  # BTHUSB = Windows owns it, WinUSB = available to Incus Multicodec
     removable: bool
     # A driver change is waiting for a Windows restart (the old driver couldn't be stopped, which is
     # normal for the PC's own Bluetooth while Windows is using it)
@@ -149,7 +149,7 @@ def list_adapters() -> list[Adapter]:
 
 SUPPORTED, UNRELIABLE, UNSUPPORTED, UNKNOWN = "supported", "may be unreliable", "not supported", "untested"
 
-# Chips by USB vendor ID that Bluetooth Multicodec can't drive, or drives with caveats. Realtek and Intel
+# Chips by USB vendor ID that Incus Multicodec can't drive, or drives with caveats. Realtek and Intel
 # parts are judged by Bumble's own firmware tables (exact VID:PID) before this is consulted.
 VENDOR_VERDICTS = {
     0x0A12: (UNRELIABLE, "CSR chip",
@@ -157,17 +157,17 @@ VENDOR_VERDICTS = {
              "LDAC may settle at a lower bitrate"),
     0x0A5C: (UNRELIABLE, "Broadcom chip",
              "runs without the firmware patch Windows normally loads; usually fine, occasionally flaky"),
-    0x0BDA: (UNSUPPORTED, "Realtek chip", "Bluetooth Multicodec has no firmware for this Realtek model"),
-    0x8087: (UNSUPPORTED, "Intel chip", "older Intel model whose firmware Bluetooth Multicodec can't load"),
-    0x0E8D: (UNSUPPORTED, "MediaTek chip", "needs a MediaTek firmware loader Bluetooth Multicodec doesn't have"),
-    0x0CF3: (UNSUPPORTED, "Qualcomm Atheros chip", "needs a Qualcomm firmware loader Bluetooth Multicodec doesn't have"),
+    0x0BDA: (UNSUPPORTED, "Realtek chip", "Incus Multicodec has no firmware for this Realtek model"),
+    0x8087: (UNSUPPORTED, "Intel chip", "older Intel model whose firmware Incus Multicodec can't load"),
+    0x0E8D: (UNSUPPORTED, "MediaTek chip", "needs a MediaTek firmware loader Incus Multicodec doesn't have"),
+    0x0CF3: (UNSUPPORTED, "Qualcomm Atheros chip", "needs a Qualcomm firmware loader Incus Multicodec doesn't have"),
     0x33FA: (UNSUPPORTED, "Barrot chip", "only works with its maker's own Windows driver"),
     0x10D7: (UNSUPPORTED, "Actions chip", "only works with its maker's own Windows driver"),
 }
 
 
 def chip_support(adapter: Adapter) -> tuple[str, str, str]:
-    """(verdict, chip description, explanation) for using this adapter with Bluetooth Multicodec."""
+    """(verdict, chip description, explanation) for using this adapter with Incus Multicodec."""
     from bumble.drivers import intel, rtk
 
     usb = (adapter.vid, adapter.pid)
@@ -185,7 +185,7 @@ def ours() -> list[Adapter]:
 
 
 SYSTEM_ADAPTER_WARNING = (
-    "This is the Bluetooth Windows itself uses. While Bluetooth Multicodec has it, Windows Bluetooth is off: "
+    "This is the Bluetooth Windows itself uses. While Incus Multicodec has it, Windows Bluetooth is off: "
     "Bluetooth mice, keyboards, phones, Phone Link and other headphones disconnect, including at the "
     "sign-in screen, until you give it back from the tray menu. Make sure you have a touchpad or wired "
     "mouse/keyboard first. A separate USB Bluetooth dongle avoids all of this."
@@ -195,7 +195,7 @@ SYSTEM_ADAPTER_WARNING = (
 def _hard_problem(adapter: Adapter, adapters: list[Adapter]) -> str | None:
     """Reasons this adapter can never be used, whatever else is plugged in."""
     if adapter.ours:
-        return "it is already set up for Bluetooth Multicodec"
+        return "it is already set up for Incus Multicodec"
     twins = [a for a in adapters if a.usb_id == adapter.usb_id and a.instance_id != adapter.instance_id]
     if twins:
         # The WinUSB driver is installed per VID:PID, so it would capture the twin as well
@@ -207,7 +207,7 @@ def _hard_problem(adapter: Adapter, adapters: list[Adapter]) -> str | None:
 
 
 def holding_builtin(adapters: list[Adapter]) -> list[Adapter]:
-    """Built-in adapters Bluetooth Multicodec currently has (the no-dongle fallback)."""
+    """Built-in adapters Incus Multicodec currently has (the no-dongle fallback)."""
     return [a for a in adapters if a.ours and not a.removable]
 
 
@@ -229,7 +229,7 @@ def takeover_problem(adapter: Adapter, adapters: list[Adapter] | None = None) ->
     if is_system_adapter(adapter, adapters):
         # The PC's own Bluetooth is only a fallback for when there's no dongle to use instead
         if any(a.ours for a in adapters):
-            return "a dongle is already set up for Bluetooth Multicodec"
+            return "a dongle is already set up for Incus Multicodec"
         dongles = [a for a in adapters if a.instance_id != adapter.instance_id
                    and not is_system_adapter(a, adapters) and _hard_problem(a, adapters) is None]
         if dongles:
@@ -261,7 +261,7 @@ def take_over(adapter: Adapter, force: bool = False) -> None:
     if not force and (problem := takeover_problem(adapter)):
         raise RuntimeError(f"won't use {adapter.name}: {problem}")
     dest = pathlib.Path(os.environ.get("LOCALAPPDATA", ".")) / "windows-bluetooth-multicodec" / "driver"
-    args = (f'--name "Bluetooth Multicodec adapter" --manufacturer "Windows Bluetooth Multicodec" --inf btmulticodec.inf '
+    args = (f'--name "Incus Multicodec adapter" --manufacturer "Incus Multicodec" --inf btmulticodec.inf '
             f'--vid 0x{adapter.vid:04X} --pid 0x{adapter.pid:04X} --type 0 --dest "{dest}" --silent')
     code = _run_elevated(BIN / "wdi-simple.exe", args)
     if code:

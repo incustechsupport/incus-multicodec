@@ -1,4 +1,4 @@
-"""Mice and keyboards on the Bluetooth adapter Bluetooth Multicodec owns.
+"""Mice and keyboards on the Bluetooth adapter Incus Multicodec owns.
 
 Needed when the app runs on the PC's own Bluetooth (no dongle): Windows has no Bluetooth then, so
 we act as the HID host and feed input to Windows through inject.Injector.

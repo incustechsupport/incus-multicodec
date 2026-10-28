@@ -21,7 +21,8 @@ from xml.sax.saxutils import escape
 
 logger = logging.getLogger(__name__)
 
-TASK_NAME = "Windows Bluetooth Multicodec (administrator)"
+TASK_NAME = "Incus Multicodec (administrator)"
+LEGACY_TASK_NAME = "Windows Bluetooth Multicodec (administrator)"  # registered by 0.1.4-0.1.5
 CREATE_NO_WINDOW = 0x08000000
 
 
@@ -43,13 +44,17 @@ def _schtasks(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["schtasks.exe", *args], capture_output=True, text=True, creationflags=CREATE_NO_WINDOW)
 
 
+def _existing_tasks() -> list[str]:
+    return [name for name in (TASK_NAME, LEGACY_TASK_NAME) if _schtasks("/query", "/tn", name).returncode == 0]
+
+
 def task_exists() -> bool:
-    return _schtasks("/query", "/tn", TASK_NAME).returncode == 0
+    return bool(_existing_tasks())
 
 
 def start_task() -> bool:
     """Start the elevated copy through the task; no prompt. False if the task is missing."""
-    result = _schtasks("/run", "/tn", TASK_NAME)
+    result = _schtasks("/run", "/tn", (_existing_tasks() or [TASK_NAME])[0])
     if result.returncode != 0:
         logger.warning(f"couldn't start the administrator task: {result.stderr.strip() or result.stdout.strip()}")
     return result.returncode == 0
@@ -60,7 +65,7 @@ def _task_xml() -> str:
     # Priority 4 = normal: scheduled tasks otherwise run at below-normal CPU, I/O and memory priority
     return f"""<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
-  <RegistrationInfo><Description>Starts Windows Bluetooth Multicodec with administrator rights, so Bluetooth mice and keyboards also work in windows that run as administrator.</Description></RegistrationInfo>
+  <RegistrationInfo><Description>Starts Incus Multicodec with administrator rights, so Bluetooth mice and keyboards also work in windows that run as administrator.</Description></RegistrationInfo>
   <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
@@ -100,7 +105,7 @@ def _elevated(executable: str, parameters: str) -> int:
 
 def install_task() -> None:
     """Register the task (one UAC prompt, unless already elevated)."""
-    path = os.path.join(tempfile.gettempdir(), "windows-bluetooth-multicodec-task.xml")
+    path = os.path.join(tempfile.gettempdir(), "incus-multicodec-task.xml")
     with open(path, "w", encoding="utf-16") as f:
         f.write(_task_xml())
     try:
@@ -119,12 +124,11 @@ def install_task() -> None:
 
 
 def remove_task() -> None:
-    if not task_exists():
-        return
-    code = (_schtasks("/delete", "/tn", TASK_NAME, "/f").returncode if is_admin()
-            else _elevated("schtasks.exe", f'/delete /tn "{TASK_NAME}" /f'))
-    if code != 0:
-        raise RuntimeError(f"schtasks couldn't remove the task (exit code {code})")
+    for name in _existing_tasks():
+        code = (_schtasks("/delete", "/tn", name, "/f").returncode if is_admin()
+                else _elevated("schtasks.exe", f'/delete /tn "{name}" /f'))
+        if code != 0:
+            raise RuntimeError(f"schtasks couldn't remove the task (exit code {code})")
 
 
 def start_unelevated() -> None:
