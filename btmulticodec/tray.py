@@ -85,7 +85,8 @@ def _background(action):
 
 def _launch_command() -> str:
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}"'
+        # The per-user install, also from the administrator copy (which a normal start hands over to)
+        return f'"{elevation.installed_exe()}"'
     pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     return f'"{pythonw}" -m btmulticodec tray'
 
@@ -508,7 +509,13 @@ class TrayApp:
             self._update_menu()
             _error(f"The update couldn't be downloaded:\n{error}")
             return
-        updater.run_installer(path)
+        try:
+            updater.run_installer(path, release)
+        except Exception as error:
+            self._updating = False
+            self._update_menu()
+            _error(f"The update couldn't be started:\n{error}")
+            return
         # Leave straight away so the installer can replace our files. The adapter stays set up for
         # us (it's the same app coming back), so don't offer to hand it back to Windows
         self._quit(ask=False)
@@ -529,10 +536,109 @@ class TrayApp:
         self.icon.stop()
 
 
+# Both also used by the installer (packaging/multicodec.iss): the mutex says "running", the event asks
+# the running copy to quit cleanly (restoring the speakers' mute state and releasing the adapter)
+SINGLE_INSTANCE_MUTEX = r"Local\IncusMulticodec"
+QUIT_EVENT = r"Local\IncusMulticodecQuit"
+SINGLE_INSTANCE_WAIT_MS = 15_000  # a copy that is quitting to hand over (restart, admin switch) gets this long
+# The administrator copy creates these too, and by default an elevated process's objects can't be
+# opened by normal ones (admin-only DACL, high integrity label). Grant everyone signed in at the
+# console (IU) SYNCHRONIZE + MUTEX/EVENT_MODIFY_STATE (wait, release, signal; nothing else), and label
+# them medium integrity, so the normal app, the installer and the uninstaller can all see and use them.
+_SHARED_SDDL = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;OW)(A;;0x00100003;;;IU)S:(ML;;NW;;;ME)"
+_SYNC_AND_MODIFY = 0x00100003
+
+
+def _kernel32():
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    k.CreateMutexExW.restype = ctypes.c_void_p
+    k.CreateMutexExW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    k.CreateEventExW.restype = ctypes.c_void_p
+    k.CreateEventExW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32]
+    k.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    k.WaitForSingleObject.restype = ctypes.c_uint32
+    k.CloseHandle.argtypes = [ctypes.c_void_p]
+    k.LocalFree.argtypes = [ctypes.c_void_p]
+    return k
+
+
+class _SecurityAttributes(ctypes.Structure):
+    _fields_ = [("nLength", ctypes.c_uint32), ("lpSecurityDescriptor", ctypes.c_void_p),
+                ("bInheritHandle", ctypes.c_int)]
+
+
+def _shared_attributes():
+    """SECURITY_ATTRIBUTES for _SHARED_SDDL, or None (default security) if it can't be built."""
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    convert = advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+    convert.restype = ctypes.c_int
+    descriptor = ctypes.c_void_p()
+    if not convert(_SHARED_SDDL, 1, ctypes.byref(descriptor), None):
+        logger.warning(f"couldn't build the shared security descriptor (error {ctypes.get_last_error()})")
+        return None
+    # Kept for the life of the process (the objects live as long as we do)
+    return _SecurityAttributes(ctypes.sizeof(_SecurityAttributes), descriptor, 0)
+
+
+def _claim_single_instance():
+    """Own the app's mutex, waiting a little for a copy that is on its way out. Returns the handle
+    (kept for the life of the process), or None if another copy keeps running."""
+    k = _kernel32()
+    attributes = _shared_attributes()
+    WAIT_OBJECT_0, WAIT_ABANDONED, WAIT_TIMEOUT = 0x0, 0x80, 0x102
+    deadline = time.monotonic() + SINGLE_INSTANCE_WAIT_MS / 1000
+    while True:
+        handle = k.CreateMutexExW(ctypes.addressof(attributes) if attributes else None, SINGLE_INSTANCE_MUTEX, 0,
+                                  _SYNC_AND_MODIFY)
+        if handle:
+            remaining = max(0, int((deadline - time.monotonic()) * 1000))
+            result = k.WaitForSingleObject(handle, remaining)
+            if result in (WAIT_OBJECT_0, WAIT_ABANDONED):
+                return handle
+            k.CloseHandle(handle)
+            if result == WAIT_TIMEOUT:
+                return None
+        elif time.monotonic() >= deadline:
+            # Still can't open it: a copy from before this fix (default security) is running elevated
+            return None
+        else:
+            time.sleep(0.25)  # access denied: an elevated copy holds it with default security; it may be quitting
+
+
+def _watch_quit_requests(app: TrayApp) -> None:
+    """Quit cleanly when the installer or uninstaller signals QUIT_EVENT."""
+    k = _kernel32()
+    attributes = _shared_attributes()
+    event = k.CreateEventExW(ctypes.addressof(attributes) if attributes else None, QUIT_EVENT, 0, _SYNC_AND_MODIFY)
+    if not event:
+        logger.warning(f"no quit event (error {ctypes.get_last_error()}); installers will have to close the app")
+        return
+
+    def wait():
+        if k.WaitForSingleObject(event, 0xFFFFFFFF) == 0:
+            logger.info("asked to quit (installer)")
+            app._quit(ask=False)
+    threading.Thread(target=wait, name="quit-request", daemon=True).start()
+
+
 def main(transport: str | None = None) -> None:
     # "Mice and keyboards work in admin windows": every normal start (Start menu, sign-in, after an
-    # update) hands over to the elevated copy and leaves. Without the task, carry on as we are
-    if Settings.load().run_as_admin and not elevation.is_admin() and elevation.task_exists():
-        if elevation.start_task():
-            return
-    TrayApp(transport).run()
+    # update) hands over to the elevated copy under Program Files and leaves. After an update that copy
+    # is refreshed first (one UAC prompt). Without the task, or if that fails, carry on as we are
+    if Settings.load().run_as_admin and not elevation.running_protected() and elevation.task_exists():
+        try:
+            if not elevation.copy_is_current():
+                elevation.refresh_copy()
+            if elevation.start_task():
+                return
+        except Exception:
+            logger.exception("couldn't hand over to the administrator copy; running normally")
+    # One copy at a time: two would fight over the adapter and overwrite each other's settings
+    mutex = _claim_single_instance()
+    if mutex is None:
+        logger.info("Incus Multicodec is already running")
+        return
+    app = TrayApp(transport)
+    _watch_quit_requests(app)
+    app.run()

@@ -163,7 +163,7 @@ class DevicesWindow:
         """(address, name, type, status) for every paired device."""
         s = self.engine.status
         rows = []
-        for address, name in sorted(self.engine.settings.devices.items(), key=lambda kv: kv[1].lower()):
+        for address, name in sorted(dict(self.engine.settings.devices).items(), key=lambda kv: kv[1].lower()):
             if s.device == address:
                 status = (f"Streaming {s.streaming} · {s.kbps:.0f} kbps" if s.streaming and s.kbps
                           else f"Connected · {s.streaming}" if s.streaming else "Connecting...")
@@ -171,15 +171,15 @@ class DevicesWindow:
                 status = "Paired"
             rows.append((address, name, "Speaker / headphones", status))
         connected_hid = self.engine.hid.connected()
-        for address, info in sorted(self.engine.settings.hid_devices.items(), key=lambda kv: kv[1]["name"].lower()):
+        for address, info in sorted(dict(self.engine.settings.hid_devices).items(), key=lambda kv: kv[1]["name"].lower()):
             rows.append((address, info["name"], "Mouse / keyboard",
                          "Connected" if address in connected_hid else "Asleep or off"))
         return rows
 
     def _nearby_devices(self) -> list[tuple[str, str, str, str]]:
         s = self.engine.status
-        mine = set(self.engine.settings.devices) | set(self.engine.settings.hid_devices)
-        found = [(address, name) for address, name in s.found.items() if address not in mine]
+        mine = set(dict(self.engine.settings.devices)) | set(dict(self.engine.settings.hid_devices))
+        found = [(address, name) for address, name in dict(s.found).items() if address not in mine]
         # Strongest signal first: the device you're holding in pairing mode is usually the closest
         found.sort(key=lambda an: (-(s.found_rssi.get(an[0]) if s.found_rssi.get(an[0]) is not None else -999),
                                    an[1].lower()))
@@ -201,12 +201,21 @@ class DevicesWindow:
                 tree.insert("", index, iid=address, text=name, values=values)
 
     def _tick(self) -> None:
+        # Reschedule whatever happens: one error used to stop the window refreshing for good
+        try:
+            if self._refresh() == "quit":
+                return
+        except Exception:
+            logger.exception("devices window refresh failed")
+        self.root.after(REFRESH_MS, self._tick)
+
+    def _refresh(self) -> str | None:
         try:
             while True:
                 request = self.requests.get_nowait()
                 if request == "quit":
                     self.root.destroy()
-                    return
+                    return "quit"
                 if request == "show":
                     self._bring_to_front()
                     if not self.engine.status.scanning and not self.engine.status.found:
@@ -229,7 +238,7 @@ class DevicesWindow:
         else:
             self.search_var.set("Searching..." if s.scanning else "")
         self._update_buttons()
-        self.root.after(REFRESH_MS, self._tick)
+        return None
 
     def _update_buttons(self) -> None:
         ready = self.engine.device is not None

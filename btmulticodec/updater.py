@@ -11,9 +11,11 @@ redirects to its file servers) can only deliver exactly that file.
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import logging
+import msvcrt
 import os
 import re
 import subprocess
@@ -42,7 +44,15 @@ class Release:
 
 
 def parse_version(text: str) -> tuple[int, ...]:
-    return tuple(int(part) for part in re.findall(r"\d+", text)[:4])
+    """'0.2.0' -> (0, 2, 0, 0, 1). A pre-release ('0.2.0-rc1') sorts before its release: the last
+    element is 0 for pre-releases and 1 for releases, and rc numbers don't count as a fourth part."""
+    # The release part is the leading digits and dots; anything after it ("-rc1", "rc1", "b2") is a
+    # pre-release tag
+    match = re.match(r"[vV]?([0-9.]*)(.*)", text.strip())
+    core, pre = match.group(1), match.group(2).strip()
+    numbers = [int(part) for part in core.split(".") if part.isdigit()][:4]
+    numbers += [0] * (4 - len(numbers))
+    return tuple(numbers) + (0 if pre else 1,)
 
 
 def is_newer(candidate: str, current: str = __version__) -> bool:
@@ -69,30 +79,104 @@ def check() -> Release | None:
     return release if is_newer(release.version) else None
 
 
+def _folder() -> str:
+    return os.path.join(tempfile.gettempdir(), "incus-multicodec-update")
+
+
+def _clean(folder: str, keep: str | None = None) -> None:
+    """Delete earlier downloads (each is ~40 MB and was never removed before)."""
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in names:
+        path = os.path.join(folder, name)
+        if path != keep and name.startswith("incus-multicodec-setup-"):
+            try:
+                os.remove(path)
+            except OSError:
+                pass  # still running, or locked: next time
+
+
 def download(release: Release, progress=None) -> str:
-    """Download and verify the installer; returns its path. progress(done_bytes, total_bytes) is optional."""
-    folder = os.path.join(tempfile.gettempdir(), "incus-multicodec-update")
+    """Download and verify the installer; returns its path. progress(done_bytes, total_bytes) is optional.
+
+    run_installer() checks the file again, under a lock, right before starting it."""
+    folder = _folder()
     os.makedirs(folder, exist_ok=True)
+    _clean(folder)
     path = os.path.join(folder, f"incus-multicodec-setup-{release.version}.exe")
     digest = hashlib.sha256()
     done = 0
-    with _get(release.url, 60) as response, open(path + ".part", "wb") as out:
-        while chunk := response.read(256 * 1024):
-            out.write(chunk)
-            digest.update(chunk)
-            done += len(chunk)
-            if progress:
-                progress(done, release.size)
-    if done != release.size or digest.hexdigest() != release.sha256:
-        os.remove(path + ".part")
-        raise ValueError("the downloaded installer didn't match the published checksum; nothing was installed")
+    try:
+        with _get(release.url, 60) as response, open(path + ".part", "wb") as out:
+            while chunk := response.read(256 * 1024):
+                done += len(chunk)
+                if done > release.size:
+                    raise ValueError("the download is bigger than the published installer; nothing was installed")
+                out.write(chunk)
+                digest.update(chunk)
+                if progress:
+                    progress(done, release.size)
+        if done != release.size or digest.hexdigest() != release.sha256:
+            raise ValueError("the downloaded installer didn't match the published checksum; nothing was installed")
+    except BaseException:
+        try:
+            os.remove(path + ".part")
+        except OSError:
+            pass
+        raise
     os.replace(path + ".part", path)
     return path
 
 
-def run_installer(path: str) -> None:
-    """Start the installer detached. The caller must exit straight away so its files can be replaced."""
-    logger.info(f"running {path}")
-    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen([path, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/update=1"],
-                     creationflags=flags, close_fds=True)
+def _open_locked(path: str) -> int:
+    """Open `path` for reading so nobody can change, replace or delete it while the handle is open
+    (share mode read-only, no FILE_SHARE_WRITE/DELETE). Returns a CRT file descriptor."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+                                     ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p]
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING = 0x80000000, 0x1, 3
+    handle = kernel32.CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, None, OPEN_EXISTING, 0, None)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        raise OSError(ctypes.get_last_error(), f"couldn't open {path}")
+    return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+
+
+def run_installer(path: str, release: Release) -> None:
+    """Check the installer again and start it detached, holding a lock on the file in between, so it
+    can't be swapped after the check (the app may be running as administrator, and %TEMP% is open to
+    the user's other programs). The caller must exit straight away so its files can be replaced."""
+    from . import elevation
+
+    def verified(fd: int) -> bytes:
+        data = bytearray()
+        while chunk := os.read(fd, 1024 * 1024):
+            data += chunk
+        if len(data) != release.size or hashlib.sha256(data).hexdigest() != release.sha256:
+            raise ValueError("the installer changed after it was downloaded; nothing was installed")
+        return bytes(data)
+
+    fd = _open_locked(path)
+    try:
+        data = verified(fd)
+    finally:
+        os.close(fd)
+    if elevation.is_admin():
+        # The installer inherits our administrator rights, and Setup reopens its own exe by name after
+        # it starts, past any lock we hold. So run it from a folder only administrators can change
+        os.makedirs(elevation.UPDATES_DIR, exist_ok=True)
+        _clean(elevation.UPDATES_DIR)
+        path = os.path.join(elevation.UPDATES_DIR, os.path.basename(path))
+        with open(path, "wb") as out:
+            out.write(data)
+    fd = _open_locked(path)
+    try:
+        verified(fd)
+        logger.info(f"running {os.path.basename(path)}")
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+        subprocess.Popen([path, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS", "/update=1"],
+                         creationflags=flags, close_fds=True)
+    finally:
+        os.close(fd)

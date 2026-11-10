@@ -5,6 +5,7 @@
 //
 //   int  procloop_start(unsigned pid_to_exclude, int sample_rate, int channels, callback cb)
 //   void procloop_stop()
+//   int  procloop_error()   the HRESULT that stopped capture (e.g. the audio service restarted), or 0
 //   callback(const float* interleaved, int frames)   called on the capture thread; silence = zeros
 //
 // Returns 0 on success or a failing HRESULT.
@@ -67,6 +68,7 @@ private:
 
 std::thread g_thread;
 std::atomic<bool> g_running{false};
+std::atomic<int> g_error{0};  // set by the capture thread when WASAPI fails; capture stops
 IAudioClient* g_client = nullptr;
 IAudioCaptureClient* g_capture = nullptr;
 HANDLE g_event = nullptr;
@@ -81,6 +83,14 @@ void capture_loop(procloop_callback cb, int channels, int sample_rate) {
     const double idle_before_silence = 0.1;  // s without packets before we call it "nothing playing"
     while (g_running) {
         if (WaitForSingleObject(g_event, 20) == WAIT_TIMEOUT) {
+            // A client invalidated by an audio service restart or device change stops signalling, so
+            // ask it directly; without this we'd generate silence forever and nothing would notice
+            UINT32 waiting = 0;
+            HRESULT probe = g_capture->GetNextPacketSize(&waiting);
+            if (FAILED(probe)) {
+                g_error = static_cast<int>(probe);
+                break;
+            }
             // Process loopback delivers nothing while no app plays. Once it has been quiet for a moment,
             // emit silence at real-time pace (by the clock, not per timeout) so the encoder and the
             // Bluetooth stream keep running. Never while packets are flowing: that would add gaps.
@@ -100,11 +110,14 @@ void capture_loop(procloop_callback cb, int channels, int sample_rate) {
         QueryPerformanceCounter(&last_audio);
         silence_clock = last_audio;
         UINT32 packet = 0;
-        while (g_running && SUCCEEDED(g_capture->GetNextPacketSize(&packet)) && packet) {
+        HRESULT hr = S_OK;
+        // A failure here (AUDCLNT_E_DEVICE_INVALIDATED, AUDCLNT_E_SERVICE_NOT_RUNNING, ...) is permanent
+        // for this client: record it and stop, rather than falling back to generated silence forever
+        while (g_running && SUCCEEDED(hr = g_capture->GetNextPacketSize(&packet)) && packet) {
             BYTE* data = nullptr;
             UINT32 frames = 0;
             DWORD flags = 0;
-            if (FAILED(g_capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
+            if (FAILED(hr = g_capture->GetBuffer(&data, &frames, &flags, nullptr, nullptr))) break;
             if (flags & AUDCLNT_BUFFERFLAGS_SILENT) {
                 silence.assign(static_cast<size_t>(frames) * channels, 0.0f);
                 cb(silence.data(), static_cast<int>(frames));
@@ -112,6 +125,10 @@ void capture_loop(procloop_callback cb, int channels, int sample_rate) {
                 cb(reinterpret_cast<const float*>(data), static_cast<int>(frames));
             }
             g_capture->ReleaseBuffer(frames);
+        }
+        if (FAILED(hr)) {
+            g_error = static_cast<int>(hr);
+            break;
         }
     }
     CoUninitialize();
@@ -126,6 +143,8 @@ void release_all() {
 
 }  // namespace
 
+extern "C" __declspec(dllexport) int procloop_error() { return g_error; }
+
 extern "C" __declspec(dllexport) void procloop_stop() {
     g_running = false;
     if (g_thread.joinable()) g_thread.join();
@@ -135,6 +154,7 @@ extern "C" __declspec(dllexport) void procloop_stop() {
 extern "C" __declspec(dllexport) int procloop_start(unsigned pid_to_exclude, int sample_rate, int channels,
                                                     procloop_callback cb) {
     procloop_stop();
+    g_error = 0;
     HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     if (hr == RPC_E_CHANGED_MODE) hr = S_OK;
 

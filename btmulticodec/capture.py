@@ -47,6 +47,39 @@ class HalfBand:
         return out
 
 
+def downmix_to_stereo(block: np.ndarray) -> np.ndarray:
+    """(frames, channels) float32 in Windows' channel order -> (frames, 2).
+
+    Windows' layouts (KSAUDIO_SPEAKER_*): 2.1 = FL FR LFE; quad = FL FR BL BR; 5.0 = FL FR FC SL SR;
+    5.1 = FL FR FC LFE BL BR (or SL SR); 7.1 = FL FR FC LFE BL BR SL SR. Centre and surrounds are
+    folded in at -3 dB and LFE is dropped (the ITU stereo downmix). Front left/right stay at full
+    level, so stereo content on a surround output sounds as before; peaks above full scale are
+    clipped later (float_to_s24), as Windows' own downmix does.
+    """
+    channels = block.shape[1]
+    if channels == 1:
+        return np.repeat(block, 2, axis=1)
+    if channels == 2:
+        return block
+    k = 0.7071
+    left, right = block[:, 0].copy(), block[:, 1].copy()
+    if channels == 3:  # 2.1: the third channel is the LFE
+        surrounds, centre = (), None
+    elif channels == 4:  # quad
+        surrounds, centre = ((2, 3),), None
+    elif channels == 5:  # 5.0
+        surrounds, centre = ((3, 4),), 2
+    else:  # 5.1, 7.1 and larger: FC at 2, LFE at 3
+        surrounds, centre = tuple(pair for pair in ((4, 5), (6, 7)) if channels > pair[1]), 2
+    if centre is not None:
+        left += k * block[:, centre]
+        right += k * block[:, centre]
+    for l_index, r_index in surrounds:
+        left += k * block[:, l_index]
+        right += k * block[:, r_index]
+    return np.stack([left, right], axis=1)
+
+
 class _Rechunker:
     """Collects float32 stereo frames and emits exact chunk_frames-sized s24 chunks."""
 
@@ -79,7 +112,12 @@ class SystemAudioCapture:
         self.name = self.render["name"]
         self.streams = []
         self._stop = threading.Event()
+        self._follower: threading.Thread | None = None
         self._gain = 1.0
+        # Set (from any thread) when capture can no longer deliver the right audio; the streaming
+        # loop checks it and restarts capture
+        self.failure: str | None = None
+        self._follow_device_changes = True  # the speaker loopback is bound to one device
 
     def output_rate(self, supported: list[int]) -> int:
         """Pick the codec rate: the mix rate if the sink takes it, otherwise the mix rate halved (decimated)."""
@@ -105,7 +143,7 @@ class SystemAudioCapture:
 
         def on_loopback(data, frames, time_info, status):
             block = np.frombuffer(data, np.float32).reshape(-1, in_ch)
-            stereo = block[:, :2] if in_ch >= 2 else np.repeat(block, 2, axis=1)
+            stereo = downmix_to_stereo(block)  # 5.1/7.1 outputs: keep the centre (dialogue) and surrounds
             for stage in stages:
                 stereo = stage(stereo)
             rechunk.push(stereo * self._gain)
@@ -124,36 +162,87 @@ class SystemAudioCapture:
         ]
         for stream in self.streams:
             stream.start_stream()
-        self._stop.clear()
-        threading.Thread(target=self._volume_follower, name="volume", daemon=True).start()
+        self._start_follower()
         logger.info(f"capturing system audio from {self.name} at {self.device_rate} Hz -> {self.rate} Hz")
 
-    def _volume_follower(self) -> None:
-        """Track Windows' volume as our gain and keep the PC speakers muted while we stream."""
+    def _start_follower(self) -> None:
+        # A fresh stop flag per run: with one shared Event, a quick stop() + start() (AVDTP suspend
+        # then start) cleared the flag before the old thread saw it, leaving two followers that
+        # each restored a different "was muted" state
+        self._stop_follower()
+        self.failure = None
+        self._stop = threading.Event()
+        self._follower = threading.Thread(target=self._volume_follower, args=(self._stop,), name="volume",
+                                          daemon=True)
+        self._follower.start()
+
+    def _stop_follower(self) -> None:
+        self._stop.set()
+        follower, self._follower = self._follower, None
+        if follower is not None and follower is not threading.current_thread():
+            follower.join(timeout=2)  # it restores the speakers' mute state on its way out
+
+    def _volume_follower(self, stop: threading.Event) -> None:
+        """Track Windows' volume as our gain and keep the PC speakers muted while we stream.
+
+        Follows the default output device: if Windows switches to other speakers, the old ones get
+        their mute state back and the new ones are muted (and the speaker loopback, which is bound to
+        the old device, is flagged so the stream restarts capture on the new one).
+        """
         try:
             import comtypes
             from pycaw.pycaw import AudioUtilities
             comtypes.CoInitialize()
-            endpoint = AudioUtilities.GetSpeakers().EndpointVolume
         except Exception as error:
             logger.warning(f"no endpoint volume control ({error}); streaming at full level")
             return
-        was_muted = endpoint.GetMute()
+        speakers = endpoint = None
+        was_muted = False
+
+        def release() -> None:
+            if endpoint is not None and self.mute_speakers:
+                try:
+                    endpoint.SetMute(was_muted, None)
+                except Exception as error:
+                    logger.warning(f"couldn't restore the speakers' mute state: {error}")
+
         try:
-            while not self._stop.wait(0.05):
-                self._gain = 10 ** (endpoint.GetMasterVolumeLevel() / 20)
-                if self.mute_speakers and not endpoint.GetMute():
-                    endpoint.SetMute(True, None)
+            ticks = 0
+            while True:
+                if endpoint is None or ticks % 20 == 0:  # check for a new default device about once a second
+                    try:
+                        current = AudioUtilities.GetSpeakers()
+                    except Exception:
+                        current = None
+                    if current is not None and (speakers is None or current.id != speakers.id):
+                        if speakers is not None:
+                            logger.info(f"default output changed to {current.FriendlyName}")
+                            if self._follow_device_changes:
+                                self.failure = "the Windows output device changed"
+                        release()
+                        speakers, endpoint = current, current.EndpointVolume
+                        was_muted = bool(endpoint.GetMute())
+                if endpoint is not None:
+                    self._gain = 10 ** (endpoint.GetMasterVolumeLevel() / 20)
+                    if self.mute_speakers and not endpoint.GetMute():
+                        endpoint.SetMute(True, None)
+                ticks += 1
+                if stop.wait(0.05):
+                    break
+        except Exception as error:
+            logger.warning(f"volume follower stopped: {error}")
         finally:
-            if self.mute_speakers:
-                endpoint.SetMute(was_muted, None)
+            release()
 
     def stop(self) -> None:
-        self._stop.set()
         for stream in self.streams:
-            stream.stop_stream()
-            stream.close()
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception as error:
+                logger.warning(f"closing an audio stream: {error}")
         self.streams = []
+        self._stop_follower()
 
     def close(self) -> None:
         self.stop()
@@ -177,8 +266,28 @@ class AppAudioCapture(SystemAudioCapture):
         self.dll = ctypes.CDLL(str(self.DLL_PATH))
         self.dll.procloop_start.argtypes = [ctypes.c_uint, ctypes.c_int, ctypes.c_int, self._CALLBACK]
         self.dll.procloop_start.restype = ctypes.c_int
+        # procloop_error (newer DLLs): the HRESULT that stopped the capture thread, or 0
+        self._dll_error = getattr(self.dll, "procloop_error", None)
+        if self._dll_error is not None:
+            self._dll_error.argtypes = []
+            self._dll_error.restype = ctypes.c_int
         self.name = f"apps' audio (before {self.render['name']} effects)"
         self._callback = None
+        self._fallback = False
+
+    @property
+    def failure(self) -> str | None:
+        if self._failure:
+            return self._failure
+        if not self._fallback and self._dll_error is not None:
+            hr = self._dll_error()
+            if hr:
+                return f"Windows audio capture failed (HRESULT 0x{hr & 0xFFFFFFFF:08X})"
+        return None
+
+    @failure.setter
+    def failure(self, value: str | None) -> None:
+        self._failure = value
 
     def start(self, chunk_frames: int, on_chunk) -> None:
         rechunk = _Rechunker(chunk_frames, on_chunk)
@@ -205,19 +314,21 @@ class AppAudioCapture(SystemAudioCapture):
             logger.warning(f"process loopback unavailable (HRESULT 0x{hr & 0xFFFFFFFF:08X}); "
                            "capturing after the speaker's effects instead")
             self._fallback = True
+            self._follow_device_changes = True
             super().start(chunk_frames, on_chunk)
             return
         self._fallback = False
-        self._stop.clear()
-        threading.Thread(target=self._volume_follower, name="volume", daemon=True).start()
+        # Process loopback isn't tied to an output device, so a device switch only moves the muting
+        self._follow_device_changes = False
+        self._start_follower()
         logger.info(f"capturing apps' audio (process loopback) at {self.device_rate} Hz -> {self.rate} Hz")
 
     def stop(self) -> None:
-        if getattr(self, "_fallback", False):
+        if self._fallback:
             super().stop()
             return
-        self._stop.set()
         self.dll.procloop_stop()
+        self._stop_follower()
 
 
 def open_system_audio(mute_speakers: bool = True):

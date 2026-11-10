@@ -87,6 +87,10 @@ def sample_rates(key: str, caps) -> list[int]:
         # Media Foundation's AAC encoder only takes 44.1/48 kHz
         return [hz for hz in (48000, 44100)
                 if caps.sampling_frequency & AacMediaCodecInformation.SamplingFrequency.from_int(hz)]
+    if key == "ldac":
+        # The LDAC capability can advertise 176.4/192 kHz, but libldac only encodes 44.1-96 kHz
+        # (ldacBT_assert_pcm_sampling_freq): capture halves a 192 kHz mix to 96 kHz instead
+        return [hz for hz in caps.sample_rates if hz <= 96000]
     return caps.sample_rates
 
 

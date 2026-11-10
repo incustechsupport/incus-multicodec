@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import platform
 import queue
 import re
@@ -75,7 +76,21 @@ def log_tail() -> str:
         return ""
     if size > LOG_TAIL_BYTES:
         data = data[data.find(b"\n") + 1:]  # start on a whole line
-    return mask_addresses(data.decode("utf-8", errors="replace"))
+    return hide_user_paths(mask_addresses(data.decode("utf-8", errors="replace")))
+
+
+def hide_user_paths(text: str) -> str:
+    """Log lines name files under the user's profile (C:\\Users\\<name>\\...), which would send the
+    Windows user name: replace the profile folder with %USERPROFILE%."""
+    for variable in ("USERPROFILE", "LOCALAPPDATA", "APPDATA", "TEMP", "TMP"):
+        value = os.environ.get(variable)
+        if not value or len(value) < 4:
+            continue
+        profile = os.environ.get("USERPROFILE", "")
+        replacement = ("%USERPROFILE%" + value[len(profile):]
+                       if profile and value.lower().startswith(profile.lower()) else f"%{variable}%")
+        text = re.sub(re.escape(value), lambda _m: replacement, text, flags=re.IGNORECASE)
+    return text
 
 
 def send(description: str, email: str, system: str, log: str) -> str:
@@ -106,6 +121,9 @@ class BugReportWindow:
         self.icon_image = icon_image
         self.requests: queue.Queue = queue.Queue()
         self.thread: threading.Thread | None = None
+        # Each window gets a new number; a send result is only shown in the window that sent it (a
+        # result arriving after its window closed used to clear the next window's text)
+        self.generation = 0
 
     # ------------------------------------------------------------------ any thread
     def show(self) -> None:
@@ -122,6 +140,8 @@ class BugReportWindow:
 
     # ------------------------------------------------------------------ window thread
     def _run(self) -> None:
+        self.generation += 1
+        generation = self.generation
         root = tk.Tk()
         root.title(TITLE)
         root.geometry("560x520")
@@ -158,8 +178,9 @@ class BugReportWindow:
                         root.deiconify()
                         root.lift()
                         root.focus_force()
-                    elif isinstance(request, tuple):  # ("sent", id) / ("failed", message) from the sender
-                        self._finished(root, widgets, *request)
+                    elif isinstance(request, tuple):  # ("sent", id, gen) / ("failed", message, gen)
+                        if request[2] == generation:
+                            self._finished(root, widgets, request[0], request[1])
             except queue.Empty:
                 pass
             root.after(150, poll)
@@ -241,15 +262,16 @@ class BugReportWindow:
             return
         widgets["send"].state(["disabled"])
         widgets["status"].set("Sending...")
+        generation = self.generation
 
         def worker():
             try:
                 reference = send(description, email, system, log)
                 logger.info("bug report sent (%s)", reference)
-                self.requests.put(("sent", reference))
+                self.requests.put(("sent", reference, generation))
             except Exception as error:
                 logger.warning("bug report failed: %s", error)
-                self.requests.put(("failed", str(error)))
+                self.requests.put(("failed", str(error), generation))
         threading.Thread(target=worker, name="bug-report-send", daemon=True).start()
 
     def _finished(self, root: tk.Tk, widgets: dict, outcome: str, detail: str) -> None:

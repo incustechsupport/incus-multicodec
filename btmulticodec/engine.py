@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from bumble import hci
 from bumble.a2dp import make_audio_source_service_sdp_records
-from bumble.avdtp import AVDTP_TSEP_SNK, Listener, Protocol, find_avdtp_service_with_connection
+from bumble.avdtp import AVDTP_TSEP_SNK, Listener, Protocol, State, find_avdtp_service_with_connection
 from bumble.core import AdvertisingData, PhysicalTransport
 from bumble.device import Device, DeviceConfiguration
 from bumble.pairing import PairingConfig, PairingDelegate
@@ -27,7 +27,7 @@ import usb1
 from . import adapters, bumble_patches, capture, selection  # noqa: F401 (bumble_patches: applied on import)
 from .hidhost import HidHost, advertised_name, is_hid_advertisement
 from .settings import KEYS_FILE, STATE_DIR, Settings, system_adapter
-from .stream import LivePump
+from .stream import CaptureFailed, LivePump
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,15 @@ FIRMWARE_DIR = APP_DIR / "firmware"
 CLASS_OF_DEVICE = 0x28010C  # computer/laptop, Audio + Capturing service bits
 ADAPTER_POLL_SECONDS = 5
 RECONNECT_SECONDS = 20
+# After a connection that came up but couldn't stream (or a stream that died), wait before trying
+# again, doubling each time: otherwise a lasting failure pages the headphones every second or two
+RETRY_FIRST_SECONDS = 5
+RETRY_MAX_SECONDS = 300
+# A stream counts as working (and the backoff is reset) once it has run this long: resetting it as
+# soon as the stream starts let a stream that dies straight away retry every 5 s for ever
+HEALTHY_STREAM_SECONDS = 15
+# HCI errors meaning the headphones no longer have our pairing: retrying can't help
+LOST_PAIRING_ERRORS = (hci.HCI_AUTHENTICATION_FAILURE_ERROR, hci.HCI_PIN_OR_KEY_MISSING_ERROR)
 
 
 class NotASpeaker(RuntimeError):
@@ -94,6 +103,12 @@ class Engine:
         self._session: asyncio.Task | None = None  # the running adapter session
         self._released = False  # adapter handed back; don't reopen it
         self._unreachable: str | None = None  # device whose reconnect failure was already reported
+        self.pump: LivePump | None = None  # the running stream's packet pump
+        self._failures: dict[str, int] = {}  # address -> setup/stream failures in a row
+        self._retry_at: dict[str, float] = {}  # address -> loop time before which we don't reconnect
+        self._lost = None  # the connection whose stream loss is already being handled
+        self._capture_restarts: list[float] = []  # loop times of recent in-place capture restarts
+        self._streaming_since: float | None = None  # loop time the current stream started
 
     # ------------------------------------------------------------------ public (any thread)
     def start(self) -> None:
@@ -133,7 +148,13 @@ class Engine:
 
     # ------------------------------------------------------------------ plumbing
     def _call(self, coroutine) -> None:
-        asyncio.run_coroutine_threadsafe(coroutine, self.loop)
+        name = getattr(coroutine, "__name__", "request")
+        future = asyncio.run_coroutine_threadsafe(coroutine, self.loop)
+
+        def log_failure(done) -> None:
+            if not done.cancelled() and done.exception() is not None:
+                logger.error(f"{name} failed", exc_info=done.exception())
+        future.add_done_callback(log_failure)
 
     def _changed(self, message: str | None = None) -> None:
         if message is not None:
@@ -163,6 +184,9 @@ class Engine:
         while True:
             spec = self.transport_spec or await self._wait_for_adapter()
             if self._released:
+                # Only reachable with a fixed transport (_wait_for_adapter waits while released):
+                # wait for resume_adapter instead of spinning
+                await asyncio.sleep(ADAPTER_POLL_SECONDS)
                 continue
             self._session = asyncio.ensure_future(self._run_adapter(spec))
             try:
@@ -218,6 +242,7 @@ class Engine:
                 await self.connection.disconnect()
             except Exception:
                 pass
+        self._stop_pump()
         self._teardown_capture()
         if self._session is not None:
             self._session.cancel()
@@ -246,11 +271,17 @@ class Engine:
             # Keep trying to reach the wanted device; headphones that power on later can also connect to us
             terminated = asyncio.ensure_future(transport.source.terminated)
             while not terminated.done():
-                if self._want_device and self.connection is None and not self.status.scanning:
-                    await self._try_connect(self._want_device)
+                timeout = RECONNECT_SECONDS
+                want = self._want_device
+                if want and self.connection is None and not self.status.scanning:
+                    wait = self._retry_at.get(want, 0) - self.loop.time()
+                    if wait > 0:
+                        timeout = min(timeout, wait)  # backing off after failures
+                    else:
+                        await self._try_connect(want)
                 self._wake.clear()
                 try:
-                    await asyncio.wait_for(asyncio.shield(self._wake.wait()), RECONNECT_SECONDS)
+                    await asyncio.wait_for(asyncio.shield(self._wake.wait()), timeout)
                 except asyncio.TimeoutError:
                     pass
 
@@ -305,6 +336,14 @@ class Engine:
         # One setup per connection: an outgoing connect also fires the "connection" event, and two
         # setups would open two AVDTP sessions, which speakers answer by refusing the audio channel
         if self.connection is not None:
+            if connection is not self.connection:
+                # Another device took the slot while this link was coming up (we paged A, B connected
+                # in): don't leave this ACL link open with nothing using it
+                logger.info(f"dropping a second audio link to {connection.peer_address}")
+                try:
+                    await connection.disconnect()
+                except Exception:
+                    pass
             return
         self.connection = connection
         address = str(connection.peer_address).split("/")[0]
@@ -327,18 +366,117 @@ class Engine:
                 await connection.disconnect()
             except Exception:
                 pass
+        except hci.HCI_Error as error:
+            if error.error_code in LOST_PAIRING_ERRORS:
+                # The headphones forgot us (reset, or paired with too many devices): retrying only
+                # fails again, so stop until the user pairs them again
+                logger.warning(f"{name}: pairing lost ({error})")
+                if self._want_device == address:
+                    self._want_device = None
+                self._changed(f"{name} no longer has this PC's pairing. Pair it again from Devices.")
+            else:
+                logger.exception("stream setup failed")
+                self._changed(f"Couldn't start audio on {name}: {error}{self._note_failure(address)}")
+            try:
+                await connection.disconnect()
+            except Exception:
+                pass
         except Exception as error:
             logger.exception("stream setup failed")
-            self._changed(f"Couldn't start audio on {name}: {error}")
+            self._changed(f"Couldn't start audio on {name}: {error}{self._note_failure(address)}")
             try:
                 await connection.disconnect()
             except Exception:
                 pass
 
+    def _note_failure(self, address: str) -> str:
+        """Count a failed setup or a dead stream, and schedule the next attempt further out each time."""
+        count = self._failures.get(address, 0) + 1
+        self._failures[address] = count
+        delay = min(RETRY_MAX_SECONDS, RETRY_FIRST_SECONDS * 2 ** (count - 1))
+        self._retry_at[address] = self.loop.time() + delay
+        return f" (trying again in {delay} s)" if delay < 60 else f" (trying again in {delay // 60} min)"
+
+    def _clear_backoff(self, address: str | None) -> None:
+        if address:
+            self._failures.pop(address, None)
+            self._retry_at.pop(address, None)
+
+    def _stop_pump(self) -> None:
+        pump, self.pump = self.pump, None
+        if pump is not None:
+            asyncio.ensure_future(pump.stop())
+
+    def _on_stream_lost(self, connection, why: str, error: BaseException | None = None) -> None:
+        """The stream ended without the link going down: the headphones closed or aborted it, the
+        audio channel dropped, or encoding/capture failed. Restart through a fresh connection."""
+        if connection is not self.connection or connection is None or self._lost is connection:
+            return  # stale, or already being handled (a CLOSE is followed by the channel closing)
+        address, name = self.status.device, self.status.device_name
+        if isinstance(error, CaptureFailed) and self.stream is not None and self.pump is not None:
+            now = self.loop.time()
+            self._capture_restarts = [t for t in self._capture_restarts if now - t < 60] + [now]
+            if len(self._capture_restarts) <= 3:
+                asyncio.ensure_future(self._restart_capture(connection, error))
+                return
+            why = f"audio capture keeps failing: {error}"
+        self._lost = connection
+        logger.warning(f"stream to {name} ended: {why}")
+        self._stop_pump()
+        self._teardown_capture()
+        self.status.streaming = None
+        self._changed(f"Audio to {name} stopped ({why}){self._note_failure(address) if address else ''}")
+        asyncio.ensure_future(self._drop(connection))
+
+    async def _drop(self, connection) -> None:
+        try:
+            await connection.disconnect()
+        except Exception:
+            pass
+
+    async def _restart_capture(self, connection, error: BaseException) -> None:
+        """Capture died or the output device changed: reopen it and carry on with the same stream,
+        if the new capture can feed the rate already negotiated with the headphones."""
+        pump, stream = self.pump, self.stream
+        logger.warning(f"restarting audio capture: {error}")
+        await pump.stop()
+        # No capture while we reopen it: a START from the headphones meanwhile must not start the pump
+        # on the closed one (LivePump.start waits for a capture); we start it below if still streaming
+        pump.capture = None
+        self._teardown_capture()
+        await asyncio.sleep(1)  # let Windows settle (service restart, device switch)
+        if connection is not self.connection or self.stream is not stream or self._lost is connection:
+            return
+        try:
+            new_capture = self._open_capture()  # on this thread, like the first open
+            try:
+                new_capture.output_rate([pump.sample_rate])  # raises if it can't feed the negotiated rate
+            except Exception:
+                new_capture.close()
+                raise
+        except Exception as reopen_error:
+            logger.exception("couldn't reopen capture")
+            self.pump = pump
+            self._on_stream_lost(connection, f"audio capture failed: {reopen_error}")
+            return
+        self.capture = pump.capture = new_capture
+        self.pump = pump
+        channel = getattr(stream, "rtp_channel", None)
+        if channel is None:
+            self._on_stream_lost(connection, "the audio channel closed")
+            return
+        if stream.state == State.STREAMING:
+            await pump.start(channel)  # a no-op if a START from the headphones already restarted it
+        # (if they suspended meanwhile, their next START starts the pump with the new capture)
+        self._changed(f"Audio capture restarted ({error})")
+
     def _on_disconnection(self, connection, reason) -> None:
         if connection is not self.connection:
             return
         name = self.status.device_name
+        # Stop the pump first: with capture closed under it, it would wait for audio forever and keep
+        # its encoder (and Media Foundation, for AAC) alive
+        self._stop_pump()
         self._teardown_capture()
         self.connection = self.stream = None
         self.status.device = self.status.device_name = self.status.streaming = None
@@ -384,12 +522,29 @@ class Engine:
         configuration = selection.configure(key, caps, rate)
         pump = LivePump(self.device.host, self.capture, rate,
                         selection.session_factory(key, configuration, rate, self.settings.ldac_quality),
-                        on_stats=self._on_stats)
+                        on_stats=self._on_stats,
+                        on_failure=lambda error: self._on_stream_lost(connection, str(error), error))
+        self.pump = pump
         source = protocol.add_source(configuration, pump)
+        # Bumble's source only stops the pump on SUSPEND. When the headphones CLOSE or ABORT the stream
+        # (multipoint handover, an error on their side), stop it ourselves and recover
+        source.on("close", lambda: self._on_stream_lost(connection, "the headphones closed the stream"))
+        source.on("abort", lambda: self._on_stream_lost(connection, "the headphones aborted the stream"))
         self.stream = await protocol.create_stream(source, sinks[key])
         await self.stream.start()
+        # The audio channel closing on its own. (Bumble only wires its source's rtp_channel_close
+        # event when the headphones open that channel; we open it, so listen on the channel itself.)
+        # It also closes when the whole link drops: give the disconnection a moment to arrive, so
+        # that case is handled as a plain disconnect
+        channel = getattr(self.stream, "rtp_channel", None)
+        if channel is not None:
+            channel.on("close", lambda: self.loop.call_later(
+                0.5, self._on_stream_lost, connection, "the audio channel closed"))
         self.protocol = protocol
         self.settings.last_device = self._want_device = self.status.device
+        self._streaming_since = self.loop.time()  # backoff is cleared once it has run a while (_on_stats)
+        self._capture_restarts = []
+        self._lost = None
         self.settings.save()
         self.status.streaming = selection.BY_KEY[key].label
         self._changed(f"Streaming {selection.BY_KEY[key].label} to {self.status.device_name}")
@@ -409,6 +564,10 @@ class Engine:
 
     def _on_stats(self, mode, kbps, backlog_ms, dropped) -> None:
         self.status.streaming, self.status.kbps = mode, kbps
+        if (self._streaming_since is not None
+                and self.loop.time() - self._streaming_since >= HEALTHY_STREAM_SECONDS):
+            self._streaming_since = None
+            self._clear_backoff(self.status.device)
         self._changed()
 
     # ------------------------------------------------------------------ requests
@@ -416,6 +575,7 @@ class Engine:
         if self.connection is not None:
             await self._disconnect_request()
         self._want_device = address
+        self._clear_backoff(address)  # the user asked: try now, whatever failed before
         self._wake.set()
 
     async def _disconnect_request(self) -> None:
@@ -428,6 +588,7 @@ class Engine:
             address = self.status.device
             await self.connection.disconnect()
             self._want_device = address
+            self._clear_backoff(address)
             self._wake.set()
 
     async def _scan(self, seconds: int, fresh: bool = True) -> None:
@@ -548,4 +709,5 @@ class Engine:
                 await self.connection.disconnect()
             except Exception:
                 pass
+        self._stop_pump()
         self._teardown_capture()

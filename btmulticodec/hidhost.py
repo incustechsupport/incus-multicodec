@@ -48,6 +48,12 @@ SCAN_SILENCE_RESTART_S = 30
 # Connect + re-encrypt + GATT setup of a waking device. Anything longer is stuck; giving up frees the
 # radio so the background scan catches the device's next wake-up advert.
 RECONNECT_TIMEOUT_S = 30
+# After a failed LE reconnect, ignore the device's adverts for a while (doubling up to the maximum):
+# a mouse that now belongs to another PC keeps advertising, and each attempt also stops the scan
+LE_RETRY_FIRST_S, LE_RETRY_MAX_S = 10, 300
+LOST_PAIRING_ERRORS = (hci.HCI_AUTHENTICATION_FAILURE_ERROR, hci.HCI_PIN_OR_KEY_MISSING_ERROR)
+# Boot-protocol reports over Bluetooth carry a report ID: 1 = keyboard, 2 = mouse
+BOOT_BY_REPORT_ID = {1: ReportDescriptor(BOOT_KEYBOARD), 2: ReportDescriptor(BOOT_MOUSE)}
 
 
 def is_hid_advertisement(data: AdvertisingData) -> bool:
@@ -84,6 +90,9 @@ class HidHost:
         self.scan_failed = False
         self.scan_params: tuple[int, int] | None = None  # (interval, window) of the running scan
         self.announced: set[str] = set()  # missing devices last logged as being waited for
+        self.le_failures: dict[str, int] = {}  # identity -> failed reconnects in a row
+        self.le_retry_at: dict[str, float] = {}  # identity -> loop time before which adverts are ignored
+        self.securing: dict[int, asyncio.Task] = {}  # id(connection) -> classic authentication task
 
     @property
     def settings(self):
@@ -123,8 +132,9 @@ class HidHost:
             device = self.device
             if device is None or not device.le_enabled:
                 continue
-            missing = [a for a, info in self.known().items()
-                       if info.get("le") and a not in self.links and a not in self.connecting]
+            missing = [a for a, info in list(self.known().items())
+                       if info.get("le") and not info.get("pairing_lost") and a not in self.links
+                       and a not in self.connecting]
             want_scan = bool(missing) and not self.paused
             if not missing:
                 self.announced = set()
@@ -183,7 +193,8 @@ class HidHost:
         info = self.known().get(identity)
         # Also while the user's "Add a device" search runs (paused): the devices window keeps searching
         # for as long as it's open, and a paired mouse must still come back when it wakes up
-        if info and info.get("le") and identity not in self.links and identity not in self.connecting:
+        if (info and info.get("le") and not info.get("pairing_lost") and identity not in self.links
+                and identity not in self.connecting and self.last_advert >= self.le_retry_at.get(identity, 0)):
             # Claim it now: a burst of advertisements arrives before the task first runs
             self.connecting.add(identity)
             logger.info(f"{info.get('name', identity)} is advertising; reconnecting")
@@ -196,9 +207,11 @@ class HidHost:
         device = self.device
         connection = None
         key = identity
+        stopped_user_scan = False
         try:
             async with asyncio.timeout(None if pairing else RECONNECT_TIMEOUT_S):
                 if device.scanning:
+                    stopped_user_scan = self.paused  # the user's "Add a device" search: restart it after
                     await device.stop_scanning()
                 target = current or hci.Address(identity)
                 if current is not None and not current.is_resolvable:
@@ -228,8 +241,11 @@ class HidHost:
                     await connection.encrypt()
                 descriptor = await self._subscribe_gatt(key, connection)
             self._linked(key, connection, descriptor)
+            self.le_failures.pop(key, None)
+            self.le_retry_at.pop(key, None)
             return True
         except Exception as error:
+            lost_pairing = isinstance(error, hci.HCI_Error) and error.error_code in LOST_PAIRING_ERRORS
             if isinstance(error, TimeoutError):
                 error = f"no answer within {RECONNECT_TIMEOUT_S}s; waiting for it to advertise again"
             logger.info(f"LE HID {key}: {error}")
@@ -240,11 +256,39 @@ class HidHost:
                 except Exception:
                     pass
             if pairing:
+                if key != identity:
+                    # Re-keyed to the identity address before failing: the caller only knows the
+                    # address it asked for, so remove the entry and bond under the new key here
+                    self.known().pop(key, None)
+                    self.settings.save()
+                    try:
+                        await device.keystore.delete(key)
+                    except (KeyError, AttributeError):
+                        pass
                 raise
+            info = self.known().get(key)
+            if lost_pairing and info is not None:
+                # It's bonded to another PC now (or was reset): stop chasing its adverts until re-paired
+                info["pairing_lost"] = True
+                self.settings.save()
+                self.engine._changed(f"{info.get('name', key)} no longer has this PC's pairing. "
+                                     "Remove it and pair it again from Devices.")
+            elif connection is not None:
+                # Only after a link that came up and then failed (security, GATT): a plain timeout or
+                # failed connect is the sleeping-mouse case, and its next wake-up advert must be taken
+                count = self.le_failures.get(key, 0) + 1
+                self.le_failures[key] = count
+                self.le_retry_at[key] = (asyncio.get_running_loop().time()
+                                         + min(LE_RETRY_MAX_S, LE_RETRY_FIRST_S * 2 ** (count - 1)))
             return False
         finally:
             self.connecting.discard(identity)
             self.connecting.discard(key)
+            if stopped_user_scan and self.paused and device is self.device and not device.scanning:
+                try:
+                    await device.start_scanning(active=True, scan_interval=120, scan_window=30)
+                except Exception as error:
+                    logger.debug(f"couldn't resume the search after reconnecting: {error}")
 
     async def _subscribe_gatt(self, identity: str, connection) -> ReportDescriptor:
         peer = Peer(connection)
@@ -289,10 +333,14 @@ class HidHost:
         if address not in self.known():
             return
         info = self.known()[address]
-        if not connection.is_encrypted:
+        if not connection.is_encrypted and id(connection) not in self.securing:
             # Anyone can claim a paired keyboard's address; only the bonded device has the link key.
-            # Reports are dropped (_on_classic_pdu) until this succeeds.
-            asyncio.ensure_future(self._secure_classic(connection, address))
+            # Reports are dropped (_on_classic_pdu) until this succeeds. Both HID channels usually
+            # open before encryption is up: one authentication per link, as a second one in flight
+            # can be refused and would then drop a genuine keyboard
+            task = asyncio.ensure_future(self._secure_classic(connection, address))
+            self.securing[id(connection)] = task
+            task.add_done_callback(lambda _t, key=id(connection): self.securing.pop(key, None))
         if channel.psm == HID_INTERRUPT_PSM:
             channel.sink = lambda pdu: self._on_classic_pdu(address, pdu)
             self._linked(address, connection, self._classic_descriptor(info))
@@ -325,7 +373,12 @@ class HidHost:
         if pdu and pdu[0] == HIDP_DATA_INPUT:
             report = pdu[1:]
             if not self.known().get(address, {}).get("descriptor") and report[:1] in (b"\x01", b"\x02"):
-                report = report[1:]  # Bluetooth boot reports carry a report ID (1 keyboard, 2 mouse)
+                # Bluetooth boot reports carry a report ID (1 keyboard, 2 mouse). Decode by that ID,
+                # not by the class of device: a keyboard with a built-in touchpad sends both
+                state = BOOT_BY_REPORT_ID[report[0]].decode(report[1:], None)
+                if state is not None:
+                    self.injector.apply(address, state)
+                return
             self._on_report(address, report, None)
 
     async def pair_classic(self, address: str, name: str, class_of_device: int) -> None:

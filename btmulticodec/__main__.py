@@ -98,6 +98,17 @@ def cmd_release_adapter(_args) -> None:
     set_system_adapter(None)
 
 
+def cmd_remove_admin_task(_args) -> None:
+    """For the uninstaller: remove the "run as administrator" task and its copy under Program Files
+    (one UAC prompt, only if they exist; the uninstaller itself runs without admin rights)."""
+    from . import elevation
+    try:
+        elevation.remove_task()
+    except Exception as error:
+        print(f"couldn't remove the administrator task: {error}")
+        sys.exit(1)
+
+
 async def _with_device(args, work):
     """Run work(device) on a powered-on Bumble device (no streaming engine)."""
     from bumble.a2dp import make_audio_source_service_sdp_records
@@ -306,6 +317,7 @@ def main():
     p.add_argument("--yes", action="store_true", help="accept turning Windows Bluetooth off (PC's own adapter, no dongle)")
     p.add_argument("--force", action="store_true", help="skip all safety checks")
     sub.add_parser("release-adapter", help="give Incus Multicodec's dongle back to Windows")
+    sub.add_parser("remove-admin-task", help="remove the run-as-administrator task (used by the uninstaller)")
     sub.add_parser("info", help="load firmware and show adapter info")
     sub.add_parser("selftest", help="check every codec encoder and the WinUSB installer")
     p = sub.add_parser("scan", help="find nearby Bluetooth devices")

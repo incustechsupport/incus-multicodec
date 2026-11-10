@@ -33,7 +33,7 @@ class Field:
     size: int
     count: int
     page: int
-    usages: list[int]  # one per element for variable fields; [min..max] range for arrays
+    usages: list[int]  # (page << 16) | usage: one per element for variable fields; [min..max] range for arrays
     logical_min: int
     logical_max: int
     is_array: bool
@@ -67,7 +67,9 @@ class ReportDescriptor:
         self.report_ids = sorted({f.report_id for f in self.fields})
 
     def _parse(self, data: bytes) -> None:
-        g = {"page": 0, "lmin": 0, "lmax": 0, "size": 0, "count": 0, "id": 0}
+        # Logical min/max are kept raw (value, bits): whether Logical Maximum is signed depends on
+        # the Logical Minimum in effect at the main item, and the two can come in either order
+        g = {"page": 0, "lmin": (0, 0), "lmax": (0, 0), "size": 0, "count": 0, "id": 0}
         stack = []
         usages: list[int] = []
         umin = umax = None
@@ -86,9 +88,9 @@ class ReportDescriptor:
                 if tag == 0:
                     g["page"] = raw
                 elif tag == 1:
-                    g["lmin"] = _signed(raw, size * 8)
+                    g["lmin"] = (raw, size * 8)
                 elif tag == 2:
-                    g["lmax"] = _signed(raw, size * 8) if g["lmin"] < 0 else raw
+                    g["lmax"] = (raw, size * 8)
                 elif tag == 7:
                     g["size"] = raw
                 elif tag == 8:
@@ -128,14 +130,17 @@ class ReportDescriptor:
             span = usages
         if not span:
             return
-        page = span[0] >> 16 or g["page"]
+        # Each usage keeps its own page: one field can mix pages (GD Wheel + Consumer AC Pan)
+        span = [u if u >> 16 else (g["page"] << 16) | u for u in span]
+        page = span[0] >> 16
         is_array = not flags & 0x02
         if is_array:
             usage_list = span
         else:
-            usage_list = [(span[min(k, len(span) - 1)]) & 0xFFFF for k in range(g["count"])]
-        self.fields.append(Field(rid, offset, g["size"], g["count"], page,
-                                 [u & 0xFFFF for u in usage_list], g["lmin"], g["lmax"],
+            usage_list = [span[min(k, len(span) - 1)] for k in range(g["count"])]
+        lmin = _signed(*g["lmin"])
+        lmax = _signed(*g["lmax"]) if lmin < 0 else g["lmax"][0]
+        self.fields.append(Field(rid, offset, g["size"], g["count"], page, usage_list, lmin, lmax,
                                  is_array, bool(flags & 0x04)))
 
     def decode(self, report: bytes, report_id: int | None = None) -> InputState | None:
@@ -167,9 +172,11 @@ class ReportDescriptor:
                     index = v - f.logical_min
                     if index >= len(f.usages):
                         continue
-                    self._apply(state, f.page, f.usages[index], 1, f)
+                    usage = f.usages[index]
+                    self._apply(state, usage >> 16, usage & 0xFFFF, 1, f)
                 else:
-                    self._apply(state, f.page, f.usages[k], v, f)
+                    usage = f.usages[k]
+                    self._apply(state, usage >> 16, usage & 0xFFFF, v, f)
         if KEY_ERROR_ROLLOVER in state.keys:
             return None  # too many keys held; the keyboard says this report is meaningless
         return state

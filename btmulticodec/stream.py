@@ -31,6 +31,13 @@ MAX_RADIO_BACKLOG_SECONDS = 0.5
 AAC_PEAK_RATIO = 1.75  # largest AAC frame / mean frame, with margin (measured up to 1.68)
 HICCUP_REPORT_SECONDS = 10  # log a summary of drops/stalls at most this often
 STALL_SECONDS = 0.06  # capture normally delivers every ~10 ms; a gap this long is a stall
+# Capture always delivers (a silence generator fills quiet spells), so this long without a single
+# chunk means it died (audio service restarted, device gone): give up and let the engine reconnect
+CAPTURE_DEAD_SECONDS = 3.0
+
+
+class CaptureFailed(RuntimeError):
+    """The audio capture stopped delivering or reported an error."""
 
 
 def _rtp(sequence: int, timestamp: int, payload: bytes) -> bytes:
@@ -234,25 +241,52 @@ class LivePump:
     timestamp pacing (which would drift against the sound card).
     """
 
-    def __init__(self, host: Host, capture, sample_rate: int, make_session, on_stats=None) -> None:
+    def __init__(self, host: Host, capture, sample_rate: int, make_session, on_stats=None,
+                 on_failure=None) -> None:
         self.host = host
         self.capture = capture  # capture.SystemAudioCapture / DeviceCapture, output_rate() already chosen
         self.sample_rate = sample_rate
         self.make_session = make_session  # (peer_mtu) -> Session
         self.on_stats = on_stats
+        self.on_failure = on_failure  # (exception) -> None, called on the loop when streaming dies
         self.task: asyncio.Task | None = None
 
     async def start(self, rtp_channel: l2cap.ClassicChannel) -> None:
-        self.task = asyncio.create_task(self._run(rtp_channel))
+        if self.task is not None and not self.task.done():
+            return  # already streaming (a START racing the engine's own capture restart)
+        if self.capture is None:
+            return  # the engine is reopening capture and starts us when it's back
+        task = asyncio.create_task(self._run(rtp_channel))
+        task.add_done_callback(self._finished)
+        self.task = task
+
+    def _finished(self, task: asyncio.Task) -> None:
+        # Without this an encoder or radio error ends the stream silently while the UI says "Streaming"
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is None:
+            return
+        logger.error("audio streaming stopped", exc_info=error)
+        if self.task is task:
+            self.task = None
+        if self.on_failure:
+            try:
+                self.on_failure(error)
+            except Exception:
+                logger.exception("on_failure failed")
 
     async def stop(self) -> None:
-        if self.task:
-            self.task.cancel()
-            try:
-                await self.task
-            except asyncio.CancelledError:
-                pass
-            self.task = None
+        task, self.task = self.task, None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass  # already logged and reported by _finished
 
     async def _run(self, rtp_channel: l2cap.ClassicChannel) -> None:
         from .realtime import audio_thread
@@ -278,6 +312,9 @@ class LivePump:
 
         acl = self.host.acl_packet_queue
         acl_size = acl.max_packet_size if acl else 1021
+        # ACL fragments per media packet, from the packets actually sent (L2CAP header included).
+        # Using the MTU would overcount on dongles with small ACL buffers (CSR8510: 310 bytes), where
+        # a 674-byte LDAC packet is 3 fragments, not 4, so congestion would be reported late
         frags_per_packet = max(1, math.ceil((rtp_channel.peer_mtu + 4) / acl_size))
         adapt_every = max(1, round(0.020 / chunk_seconds))
 
@@ -285,7 +322,9 @@ class LivePump:
             """Media packets queued in the host, not yet handed to the controller. Bumble 0.0.236's
             DataPacketQueue._packets counts ACL fragments; `pending` would also count packets the
             controller already holds (several on any healthy link)."""
-            return len(acl._packets) // frags_per_packet if acl is not None and hasattr(acl, "_packets") else 0
+            if acl is None or not hasattr(acl, "_packets"):
+                return 0
+            return math.ceil(len(acl._packets) / frags_per_packet)
 
         logger.info(f"streaming {session.mode} at {self.sample_rate} Hz, L2CAP MTU {rtp_channel.peer_mtu}")
         chunk_count = 0
@@ -300,7 +339,13 @@ class LivePump:
         try:
             self.capture.start(session.chunk_frames, on_chunk)
             while True:
-                await arrived.wait()
+                try:
+                    await asyncio.wait_for(arrived.wait(), CAPTURE_DEAD_SECONDS)
+                except asyncio.TimeoutError:
+                    raise CaptureFailed(f"no audio from the capture for {CAPTURE_DEAD_SECONDS:.0f} s") from None
+                failure = getattr(self.capture, "failure", None)
+                if failure:
+                    raise CaptureFailed(failure)
                 arrived.clear()
                 wake_pending.clear()  # before draining: a chunk appended from here on wakes us again
                 now = loop.time()
@@ -333,6 +378,7 @@ class LivePump:
                             for packet in packets:
                                 rtp_channel.write(packet)
                                 sent_bytes += len(packet)
+                            frags_per_packet = max(1, math.ceil((len(packets[-1]) + 4) / acl_size))
 
                     chunk_count += 1
                     if chunk_count % adapt_every == 0:
